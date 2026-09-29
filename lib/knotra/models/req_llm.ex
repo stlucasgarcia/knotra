@@ -31,6 +31,12 @@ defmodule Knotra.Models.ReqLLM do
     end
   end
 
+  @doc "Version of this adapter's inert continuation representation for opt-in checkpoints."
+  @impl true
+  def checkpoint_version do
+    1
+  end
+
   @doc false
   def context(%{input: input, exchanges: exchanges}) do
     with {:ok, context} <- ReqLLM.Context.normalize(input) do

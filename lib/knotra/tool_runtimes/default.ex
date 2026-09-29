@@ -7,7 +7,14 @@ defmodule Knotra.ToolRuntimes.Default do
   @behaviour Knotra.ToolRuntime
 
   @impl true
-  def execute(%{name: name, arguments: args}, tools, auth, _opts) do
+  def execute(call, tools, auth, _opts) do
+    with {:ok, module, validated} <- prepare(call, tools, auth, false) do
+      module.call(validated, auth)
+    end
+  end
+
+  @doc false
+  def prepare(%{name: name, arguments: args}, tools, auth, approval_only) do
     case Enum.find(tools, &(&1.definition().name == name)) do
       nil ->
         {:error, :unknown_tool}
@@ -15,11 +22,12 @@ defmodule Knotra.ToolRuntimes.Default do
       module ->
         definition = module.definition()
 
-        with true <- definition.read_only,
+        with true <-
+               definition.read_only == true or (approval_only and definition.read_only == false),
              true <- is_map(args),
              {:ok, validated} when is_map(validated) <- module.validate(args),
              :ok <- module.authorize(validated, auth) do
-          module.call(validated, auth)
+          {:ok, module, validated}
         else
           false -> {:error, :write_tool_not_supported}
           {:error, reason} when is_atom(reason) -> {:error, reason}

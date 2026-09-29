@@ -32,6 +32,10 @@ defmodule Knotra.Model do
   """
   @callback call(map(), keyword()) ::
               {:ok, Knotra.Reply.t()} | {:error, atom()} | {:retry, atom()}
+
+  @doc "Opt-in version of inert reply/continuation data; runtime options are never checkpointed."
+  @callback checkpoint_version() :: pos_integer()
+  @optional_callbacks checkpoint_version: 0
 end
 
 defmodule Knotra.Tool do
@@ -40,7 +44,9 @@ defmodule Knotra.Tool do
   and `read_only: true`. `validate/1` must validate untrusted arguments before
   authorization. JSON schema describes the tool to the provider; it is not a
   substitute for host-side validation (ReqLLM does not enforce map schemas).
-  Implementations must be repeatable reads. Declaring read-only is not a sandbox.
+  Implementations used by `start/5` must be repeatable reads. The opt-in durable
+  path also accepts `read_only: false` definitions for proposals, but never calls
+  their `call/2` function. Declaring read-only is not a sandbox.
   Results are strings so their representation is explicit at the model boundary.
   """
   @callback definition() :: map()
@@ -69,7 +75,10 @@ defmodule Knotra.Definition do
   @moduledoc """
   Trusted, code-defined composition. Supply an explicit version to identify it.
   Options and authorization are runtime-only and never included in public snapshots.
-  This prototype does not persist or resume compositions.
+  Durable submissions pin this version, module identities, tool definitions and
+  the model checkpoint version. Change `version` whenever semantic runtime options
+  or code change: private options/credentials are not hashed or persisted.
+  Only the default loop and tool runtime support durable approval checkpoints.
   """
   @enforce_keys [:version, :model]
   defstruct version: nil,
