@@ -126,16 +126,21 @@ store; it is not a durable persistence adapter.
 - Turn/tool counters count attempts, including retries. `max_retries` is shared
   across the execution; defaults to zero. The ReqLLM adapter disables transport
   retries and conservatively returns non-retryable `:model_error` on failure.
-- `max_steps` also bounds strategy callbacks. `timeout` is the execution deadline
-  in milliseconds; terminal observer delivery gets at most one additional second.
+- `max_steps` also bounds strategy callbacks. `timeout` is an absolute monotonic
+  deadline checked when consuming results, before dispatch, and on callback entry;
+  terminal observer delivery gets at most one additional second.
 - Cancellation kills the current local task and prevents future operations. It
   cannot undo a remote request or work spawned independently by a host tool.
 - Unexpected plugin failures produce stable failure codes, not raw exception
-  messages that might contain credentials. Terminal observer failures are visible
+  messages that might contain credentials. OTP status/crash formatting redacts
+  private state, messages, and reasons. Terminal observer failures are visible
   through `snapshot/1` as `observation_error`; delivery is not guaranteed.
 - Public snapshots include inputs, model text, requested tools, results, usage
   when supplied, counters, event sequence, and elapsed milliseconds. They exclude
   authorization context, plugin options, and private model continuations.
+  Missing wire usage stays `nil`, not zero. The ReqLLM adapter recognizes standard
+  `usage`, `usageMetadata`, `usage_metadata`, and `token_usage` envelopes; unfamiliar
+  shapes remain unknown. Explicitly reported zero usage is preserved.
 - Inputs and outputs may still contain confidential data. Hosts own access to
   handles and observer recipients, redaction, and record lifetime. Releasing a
   handle drops Knotra's copy, not copies already delivered to observers.
@@ -157,7 +162,10 @@ mix test --warnings-as-errors
 Tests need no provider keys and make no model-network calls. They cover the
 sanitized email/receipt scenario, plugin replacement, forbidden/malformed tool
 requests, limits, retries, cancellation, process death, and record isolation.
-The ReqLLM adapter is also exercised through an offline HTTP adapter.
+The ReqLLM adapter is also exercised through offline HTTP fixtures for OpenAI,
+Anthropic, and Gemini, including refusal/incomplete responses, absent usage, and
+text-only multi-turn continuations. Timer-ordering and credential-redaction
+regressions run without provider access.
 
 For fresh-model evaluation, submit sanitized inputs with a real model plugin and
 a fixture-only tool runtime, then assess facts, permitted tool use, output shape,

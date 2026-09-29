@@ -17,7 +17,7 @@ defmodule Knotra.ToolRuntimes.Default do
 
         with true <- definition.read_only,
              true <- is_map(args),
-             {:ok, validated} <- module.validate(args),
+             {:ok, validated} when is_map(validated) <- module.validate(args),
              :ok <- module.authorize(validated, auth) do
           module.call(validated, auth)
         else

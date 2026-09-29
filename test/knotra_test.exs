@@ -105,6 +105,53 @@ defmodule KnotraTest do
     def execute(_call, _tools, _auth, opts), do: Keyword.fetch!(opts, :result)
   end
 
+  defmodule GatedLoop do
+    @behaviour Knotra.Loop
+    @impl true
+    def init(owner), do: owner
+    @impl true
+    def next(_view, owner) do
+      send(owner, {:loop_waiting, self()})
+
+      receive do
+        {:return, operation} -> operation
+      end
+    end
+  end
+
+  defmodule GatedObserver do
+    @behaviour Knotra.Observer
+    @impl true
+    def record(%{status: :running}, _), do: :ok
+
+    def record(_snapshot, owner) do
+      send(owner, {:observer_waiting, self()})
+
+      receive do
+        :continue -> :ok
+      end
+    end
+  end
+
+  defmodule InvalidValidator do
+    @behaviour Knotra.Tool
+    @impl true
+    def definition, do: Receipt.definition()
+    @impl true
+    def validate(_), do: {:ok, nil}
+    @impl true
+    def authorize(args, owner) do
+      send(owner, {:should_not_authorize, args})
+      :ok
+    end
+
+    @impl true
+    def call(args, owner) do
+      send(owner, {:should_not_execute, args})
+      {:ok, "read"}
+    end
+  end
+
   setup do
     start_supervised!({Knotra, name: __MODULE__, max_executions: 2})
 
@@ -388,6 +435,134 @@ defmodule KnotraTest do
     assert_receive {:broken_observer, %{status: :failed, error: :plugin_exception}}
     assert Knotra.snapshot(execution).status == :failed
     refute inspect(Knotra.snapshot(execution)) =~ "private credential"
+  end
+
+  test "improper model call lists fail without crashing or exposing credentials", %{auth: auth} do
+    owner = self()
+
+    agent =
+      definition(fn _ ->
+        send(owner, {:model_waiting, self()})
+
+        receive do
+          :continue -> {:ok, %Reply{calls: [call() | :bad_tail]}}
+        end
+      end)
+
+    {model, opts} = agent.model
+    agent = %{agent | model: {model, Keyword.put(opts, :api_key, "MODEL_OPTION_CANARY")}}
+
+    {:ok, execution} =
+      Knotra.start(__MODULE__, agent, "Email", Map.put(auth, :credential, "AUTH_SCOPE_CANARY"))
+
+    assert_receive {:model_waiting, task}
+    monitor = Process.monitor(execution)
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        send(task, :continue)
+        assert %{status: :failed, error: :invalid_model_reply} = complete(execution)
+        refute_receive {:DOWN, ^monitor, _, _, _}
+      end)
+
+    refute log =~ "MODEL_OPTION_CANARY"
+    refute log =~ "AUTH_SCOPE_CANARY"
+    refute_receive {:receipt_read, _, _}
+  end
+
+  test "OTP status and unexpected crash reports redact private execution state", %{auth: auth} do
+    owner = self()
+
+    agent =
+      definition(fn _ ->
+        send(owner, {:model_waiting, self()})
+
+        receive do
+          :never -> {:ok, %Reply{text: "ignored"}}
+        end
+      end)
+
+    {model, opts} = agent.model
+    agent = %{agent | model: {model, Keyword.put(opts, :api_key, "MODEL_OPTION_CANARY")}}
+
+    {:ok, execution} =
+      Knotra.start(__MODULE__, agent, "Email", Map.put(auth, :credential, "AUTH_SCOPE_CANARY"))
+
+    assert_receive {:model_waiting, _task}
+    status = inspect(:sys.get_status(execution), limit: :infinity)
+    refute status =~ "MODEL_OPTION_CANARY"
+    refute status =~ "AUTH_SCOPE_CANARY"
+
+    monitor = Process.monitor(execution)
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        # Force an unrelated coordinator bug to exercise OTP's crash formatter.
+        :sys.replace_state(execution, &Map.put(&1, :events, :invalid_state))
+        assert catch_exit(Knotra.snapshot(execution))
+        assert_receive {:DOWN, ^monitor, :process, ^execution, _}
+      end)
+
+    refute log =~ "MODEL_OPTION_CANARY"
+    refute log =~ "AUTH_SCOPE_CANARY"
+  end
+
+  test "queued loop results cannot dispatch or complete after the deadline", %{auth: auth} do
+    owner = self()
+
+    for operation <- [{:model, owner}, {:done, "too late"}] do
+      agent =
+        definition(
+          fn _ ->
+            send(owner, :late_model_call)
+            {:ok, %Reply{text: "late"}}
+          end,
+          loop: {GatedLoop, owner}
+        )
+
+      {:ok, execution} = Knotra.start(__MODULE__, agent, "Email", auth)
+      assert_receive {:loop_waiting, task}
+      :ok = :sys.suspend(execution)
+      monitor = Process.monitor(task)
+      send(task, {:return, operation})
+      assert_receive {:DOWN, ^monitor, :process, ^task, :normal}
+      # Expire the absolute clock while the result is queued; no wall-clock sleep.
+      :sys.replace_state(
+        execution,
+        &Map.put(&1, :deadline_at, System.monotonic_time(:millisecond) - 1)
+      )
+
+      send(execution, :deadline)
+      :ok = :sys.resume(execution)
+      assert %{error: :deadline_exceeded, counts: %{turns: 0}, output: nil} = complete(execution)
+      refute_receive :late_model_call
+      :ok = Knotra.release(execution)
+    end
+  end
+
+  test "queued observer expiration cannot overwrite successful delivery", %{auth: auth} do
+    agent =
+      definition(fn _ -> {:ok, %Reply{text: "Done"}} end,
+        observer: {GatedObserver, self()}
+      )
+
+    {:ok, execution} = Knotra.start(__MODULE__, agent, "Email", auth)
+    assert_receive {:observer_waiting, task}
+    :ok = :sys.suspend(execution)
+    monitor = Process.monitor(task)
+    send(task, :continue)
+    assert_receive {:DOWN, ^monitor, :process, ^task, :normal}
+    send(execution, :observer_deadline)
+    :ok = :sys.resume(execution)
+    assert %{status: :completed, observation_error: nil} = Knotra.snapshot(execution)
+  end
+
+  test "malformed validation results never reach authorization or execution" do
+    assert {:error, :invalid_arguments} =
+             Knotra.ToolRuntimes.Default.execute(call(), [InvalidValidator], self(), [])
+
+    refute_receive {:should_not_authorize, _}
+    refute_receive {:should_not_execute, _}
   end
 
   test "invalid configuration is rejected before a model call", %{auth: auth} do

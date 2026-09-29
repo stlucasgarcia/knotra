@@ -11,6 +11,7 @@ defmodule Knotra.Execution do
     if valid_options?(definition, input, opts) do
       Process.flag(:trap_exit, true)
       limits = Keyword.merge(@defaults, opts) |> Map.new()
+      started_at = System.monotonic_time(:millisecond)
       timer = Process.send_after(self(), :deadline, limits.timeout)
 
       state = %{
@@ -20,7 +21,8 @@ defmodule Knotra.Execution do
         auth: auth,
         limits: limits,
         id: System.unique_integer([:positive, :monotonic]),
-        started_at: System.monotonic_time(:millisecond),
+        started_at: started_at,
+        deadline_at: started_at + limits.timeout,
         status: :running,
         events: [],
         output: nil,
@@ -60,18 +62,18 @@ defmodule Knotra.Execution do
   @impl true
   def handle_info({ref, result}, %{task: %Task{ref: ref}} = state) do
     Process.demonitor(ref, [:flush])
-    {:noreply, consume(result, %{state | task: nil})}
+    {:noreply, consume_in_time(result, %{state | task: nil})}
   end
 
   def handle_info({:DOWN, ref, :process, _pid, _reason}, %{task: %Task{ref: ref}} = state) do
-    {:noreply, consume({:plugin_error, :task_exit}, %{state | task: nil})}
+    {:noreply, consume_in_time({:plugin_error, :task_exit}, %{state | task: nil})}
   end
 
   def handle_info(:deadline, %{status: :running} = state) do
     {:noreply, state |> stop_task() |> finish(:failed, :deadline_exceeded)}
   end
 
-  def handle_info(:observer_deadline, state) do
+  def handle_info(:observer_deadline, %{stage: :terminal_observation, task: %Task{}} = state) do
     {:noreply, %{stop_task(state) | observation_error: :observer_timeout}}
   end
 
@@ -82,6 +84,27 @@ defmodule Knotra.Execution do
     stop_task(state)
     :ok
   end
+
+  @impl true
+  def format_status(status) do
+    Map.new(status, fn
+      {:state, state} when is_map(state) -> {:state, Map.take(state, [:id, :status, :counts])}
+      {:state, _} -> {:state, :redacted}
+      {:log, _} -> {:log, []}
+      {key, _} when key in [:message, :reason] -> {key, :redacted}
+      entry -> entry
+    end)
+  end
+
+  defp expired?(state), do: System.monotonic_time(:millisecond) >= state.deadline_at
+
+  defp consume_in_time(result, %{status: :running} = state) do
+    if expired?(state),
+      do: finish(state, :failed, :deadline_exceeded),
+      else: consume(result, state)
+  end
+
+  defp consume_in_time(result, state), do: consume(result, state)
 
   defp consume({:ok, :ok}, %{stage: :terminal_observation} = state) do
     Process.cancel_timer(state.timer)
@@ -168,36 +191,51 @@ defmodule Knotra.Execution do
   defp consume(_result, state), do: finish(state, :failed, :invalid_plugin_result)
 
   defp advance(state) do
-    if state.counts.steps < state.limits.max_steps do
-      {module, _} = state.definition.loop
-      view = %{input: state.input, last: state.last, counts: state.counts}
-      launch(count(state, :steps), :loop, fn -> module.next(view, state.loop_state) end)
-    else
-      finish(state, :failed, :step_limit)
+    cond do
+      expired?(state) ->
+        finish(state, :failed, :deadline_exceeded)
+
+      state.counts.steps >= state.limits.max_steps ->
+        finish(state, :failed, :step_limit)
+
+      true ->
+        {module, _} = state.definition.loop
+        view = %{input: state.input, last: state.last, counts: state.counts}
+        launch(count(state, :steps), :loop, fn -> module.next(view, state.loop_state) end)
     end
   end
 
   defp operation(state, :model) do
-    if state.counts.turns < state.limits.max_turns do
-      {module, opts} = state.definition.model
-      request = %{input: state.input, exchanges: state.exchanges, tools: state.tool_definitions}
-      state = state |> count(:turns) |> event(:model_started, %{})
-      launch(state, :model, fn -> module.call(request, opts) end)
-    else
-      finish(state, :failed, :turn_limit)
+    cond do
+      expired?(state) ->
+        finish(state, :failed, :deadline_exceeded)
+
+      state.counts.turns >= state.limits.max_turns ->
+        finish(state, :failed, :turn_limit)
+
+      true ->
+        {module, opts} = state.definition.model
+        request = %{input: state.input, exchanges: state.exchanges, tools: state.tool_definitions}
+        state = state |> count(:turns) |> event(:model_started, %{})
+        launch(state, :model, fn -> module.call(request, opts) end)
     end
   end
 
   defp operation(state, {:tool, call} = stage) do
-    if state.counts.tools < state.limits.max_tool_calls do
-      {module, opts} = state.definition.tool_runtime
-      state = state |> count(:tools) |> event(:tool_started, %{call: call})
+    cond do
+      expired?(state) ->
+        finish(state, :failed, :deadline_exceeded)
 
-      launch(state, stage, fn ->
-        module.execute(call, state.definition.tools, state.auth, opts)
-      end)
-    else
-      finish(state, :failed, :tool_limit)
+      state.counts.tools >= state.limits.max_tool_calls ->
+        finish(state, :failed, :tool_limit)
+
+      true ->
+        {module, opts} = state.definition.tool_runtime
+        state = state |> count(:tools) |> event(:tool_started, %{call: call})
+
+        launch(state, stage, fn ->
+          module.execute(call, state.definition.tools, state.auth, opts)
+        end)
     end
   end
 
@@ -230,10 +268,16 @@ defmodule Knotra.Execution do
   defp launch(state, stage, fun) do
     # Plugin exceptions may contain credentials. Retain a stable failure class,
     # never raw exception messages or provider response bodies in public records.
+    deadline = if state.status == :running, do: state.deadline_at
+
     task =
       Task.Supervisor.async(state.tasks, fn ->
         try do
-          {:ok, fun.()}
+          if deadline != nil and System.monotonic_time(:millisecond) >= deadline do
+            {:plugin_error, :deadline_exceeded}
+          else
+            {:ok, fun.()}
+          end
         rescue
           _ -> {:plugin_error, :plugin_exception}
         catch
@@ -285,11 +329,15 @@ defmodule Knotra.Execution do
     Enum.reject(exchange.reply.calls, &(&1.id in completed))
   end
 
+  # length/1 is a guard BIF: improper tails fail the guard instead of raising.
+  defp proper_list?(value) when is_list(value) and length(value) >= 0, do: true
+  defp proper_list?(_), do: false
+
   defp valid_reply?(reply, state) do
     previous_ids = for exchange <- state.exchanges, call <- exchange.reply.calls, do: call.id
 
     is_binary(reply.text) and (is_nil(reply.usage) or is_map(reply.usage)) and
-      is_list(reply.calls) and
+      proper_list?(reply.calls) and
       Enum.all?(reply.calls, fn
         %{id: id, name: name, arguments: args} ->
           is_binary(id) and id != "" and is_binary(name) and name != "" and is_map(args)
@@ -325,7 +373,7 @@ defmodule Knotra.Execution do
   defp valid_options?(definition, input, opts) do
     is_binary(input) and input != "" and is_binary(definition.version) and
       definition.version != "" and
-      is_list(definition.tools) and
+      proper_list?(definition.tools) and
       Enum.all?(
         definition.tools,
         &implements?(&1, definition: 0, validate: 1, authorize: 2, call: 2)
