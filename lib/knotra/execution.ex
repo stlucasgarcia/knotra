@@ -307,13 +307,21 @@ defmodule Knotra.Execution do
     }
 
     state = event(state, status, %{output: state.output, error: state.error})
-    state = observe(state)
 
-    %{
-      state
-      | stage: :terminal_observation,
-        timer: Process.send_after(self(), :observer_deadline, 1_000)
-    }
+    if state.durable do
+      case Knotra.Durable.persist(%{state | stage: :terminal_observation}) do
+        {:ok, recorded} -> notify_released(recorded, public(recorded))
+        {:error, reason} -> block_durable(state, reason)
+      end
+    else
+      state = observe(state)
+
+      %{
+        state
+        | stage: :terminal_observation,
+          timer: Process.send_after(self(), :observer_deadline, 1_000)
+      }
+    end
   end
 
   defp launch(state, stage, fun) do
@@ -322,24 +330,49 @@ defmodule Knotra.Execution do
         launch_task(recorded, stage, fun)
 
       {:error, reason} ->
-        case Knotra.Durable.block_failed(state, reason) do
-          {:ok, snapshot} ->
-            Process.cancel_timer(state.timer)
-            {observer, opts} = state.definition.observer
-
-            state = %{
-              state
-              | status: :blocked,
-                error: reason,
-                timer: Process.send_after(self(), :observer_deadline, 1_000)
-            }
-
-            launch_task(state, :terminal_observation, fn -> observer.record(snapshot, opts) end)
-
-          {:error, _} ->
-            exit(:persistence_failed)
-        end
+        block_durable(state, reason)
     end
+  end
+
+  defp block_durable(state, reason) do
+    Process.cancel_timer(state.timer)
+
+    case Knotra.Durable.block_failed(state, reason) do
+      {:ok, snapshot} -> notify_released(%{state | status: :blocked, error: reason}, snapshot)
+      {:error, _} -> exit(:persistence_failed)
+    end
+  end
+
+  defp notify_released(state, snapshot) do
+    worker = self()
+    supervisor = {:via, Registry, {state.durable.instance, :executions}}
+    {observer, opts} = state.definition.observer
+    tasks = state.tasks
+
+    # This notifier is supervised independently of the finished worker. The
+    # supervisor acknowledgment, not a worker DOWN signal, proves capacity is free.
+    Task.Supervisor.start_child(tasks, fn ->
+      try do
+        DynamicSupervisor.terminate_child(supervisor, worker)
+
+        notification =
+          Task.Supervisor.async_nolink(tasks, fn ->
+            try do
+              observer.record(snapshot, opts)
+            rescue
+              _ -> :observer_failed
+            catch
+              _, _ -> :observer_failed
+            end
+          end)
+
+        Task.yield(notification, 1_000) || Task.shutdown(notification, :brutal_kill)
+      catch
+        :exit, _ -> :ok
+      end
+    end)
+
+    %{state | task: nil}
   end
 
   defp launch_task(state, stage, fun) do

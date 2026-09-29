@@ -200,9 +200,11 @@ defmodule Knotra.Durable do
     if function_exported?(model, :checkpoint_version, 0) do
       with {:ok, data} <-
              Checkpoint.encode(
-               {definition.version, definition.loop, model, model.checkpoint_version(),
-                definition.tool_runtime,
-                Enum.map(definition.tools, fn tool -> {tool, tool.definition()} end)}
+               {definition.version, plugin_identity(definition.loop), Atom.to_string(model),
+                model.checkpoint_version(), plugin_identity(definition.tool_runtime),
+                Enum.map(definition.tools, fn tool ->
+                  {Atom.to_string(tool), JSON.encode!(tool.definition())}
+                end)}
              ) do
         {:ok, :crypto.hash(:sha256, data)}
       end
@@ -210,6 +212,8 @@ defmodule Knotra.Durable do
       {:error, :unsupported_composition}
     end
   end
+
+  defp plugin_identity({module, options}), do: {Atom.to_string(module), options}
 
   defp access(instance, action, id, context) do
     case Registry.meta(instance, :durable) do

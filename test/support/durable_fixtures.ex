@@ -1,5 +1,35 @@
 defmodule Knotra.DurableFixtures.Repo do
   use Ecto.Repo, otp_app: :knotra, adapter: Ecto.Adapters.SQLite3
+
+  @impl true
+  def prepare_query(:all, query, opts) do
+    # Test-only fault gate at the first read following the committed insert.
+    # SQL captures the accepted identity at this storage boundary; behavioral
+    # assertions and resubmission still use the public Knotra interface.
+    case Process.delete(:acceptance_commit_gate) do
+      {owner, tenant, key} ->
+        %{rows: [[id]]} =
+          Ecto.Adapters.SQL.query!(
+            __MODULE__,
+            "SELECT id FROM knotra_executions WHERE tenant = ? AND submission_key = ?",
+            [tenant, key],
+            log: false
+          )
+
+        send(owner, {:acceptance_committed, self(), id})
+
+        receive do
+          :continue -> :ok
+        end
+
+      nil ->
+        :ok
+    end
+
+    {query, opts}
+  end
+
+  def prepare_query(_, query, opts), do: {query, opts}
 end
 
 defmodule Knotra.DurableFixtures.Ledger do
@@ -84,6 +114,35 @@ defmodule Knotra.DurableFixtures.Model do
   end
 end
 
+defmodule Knotra.DurableFixtures.OpenAIHTTP do
+  def run(request) do
+    send(Req.Request.get_private(request, :model_owner), {:model_called, self()})
+
+    body = %{
+      "id" => "resp_checkpoint",
+      "object" => "response",
+      "model" => "gpt-4o-mini",
+      "status" => "completed",
+      "output" => [
+        %{
+          "type" => "function_call",
+          "id" => "fc_1",
+          "call_id" => "call-1",
+          "name" => "propose",
+          "arguments" => ~s({"amount":12})
+        }
+      ]
+    }
+
+    {request,
+     Req.Response.new(
+       status: 200,
+       headers: [{"content-type", "application/json"}],
+       body: JSON.encode!(body)
+     )}
+  end
+end
+
 defmodule Knotra.DurableFixtures.GatedObserver do
   @behaviour Knotra.Observer
   def record(%{status: :waiting}, owner) do
@@ -106,6 +165,22 @@ defmodule Knotra.DurableFixtures do
       model: {Knotra.DurableFixtures.Model, opts},
       tools: [Knotra.DurableFixtures.Tool],
       observer: {Knotra.Observers.Send, opts[:owner]}
+    }
+  end
+
+  def provider_definition(owner) do
+    %{
+      definition(owner: owner)
+      | model:
+          {Knotra.Models.ReqLLM,
+           model: "openai:gpt-4o-mini",
+           options: [
+             api_key: "fake-checkpoint-key",
+             req_http_options: [
+               adapter: Knotra.DurableFixtures.OpenAIHTTP,
+               plugins: [fn request -> Req.Request.put_private(request, :model_owner, owner) end]
+             ]
+           ]}
     }
   end
 

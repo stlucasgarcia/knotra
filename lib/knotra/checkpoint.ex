@@ -2,6 +2,34 @@ defmodule Knotra.Checkpoint do
   @moduledoc false
   @max_bytes 2_000_000
   @structs [Knotra.Reply, ReqLLM.Message, ReqLLM.Message.ContentPart, ReqLLM.ToolCall]
+  # Literal vocabulary is loaded with this module in every fresh VM. Being an
+  # existing atom in the writer VM is not proof that a checkpoint is portable.
+  # Arbitrary model metadata should use string keys/values, not dynamic atoms.
+  @portable_atoms ~w(
+    nil true false ok error format input options response_timeout loop_state
+    exchanges last counts limits stage remaining_ms approval version id call_id
+    name arguments disposition pending expires_at definition_version status output
+    events observation_error turns tools retries steps max_turns max_tool_calls
+    max_retries max_steps timeout reply results call text calls usage continuation
+    accepted running waiting blocked failed completed cancelled model tool setup
+    loop observation terminal_observation started model_started model_result
+    tool_started tool_result retry sequence elapsed_ms type data reason
+    role content tool_calls tool_call_id metadata reasoning_details response_id function
+    filename url file_id media_type assistant user system developer thinking
+    image image_url audio video video_url file cache_control ephemeral
+    input_tokens output_tokens total_tokens cached_tokens cache_read_tokens
+    cache_creation_tokens reasoning_tokens input_tokens_details output_tokens_details
+    input_cost output_cost total_cost
+    invalid_configuration unsupported_composition invalid_tool_definitions
+    invalid_model_reply invalid_tool_request pending_tools turn_limit tool_limit
+    step_limit retries_exhausted deadline_exceeded plugin_exception plugin_exit
+    task_exit invalid_plugin_result observer_failed observer_timeout
+    unsupported_checkpoint checkpoint_too_large stale_execution persistence_unavailable
+    persistence_failed incompatible_checkpoint interrupted unknown_tool
+    write_tool_not_supported forbidden invalid_arguments model_error
+    unsupported_tool_call incomplete_response empty_response provider_unavailable
+    temporarily_unavailable
+  )a
 
   # Only inert data, never functions, processes, ports or references. Do not decode
   # arbitrary Erlang terms, create atoms, or serialize the execution process state.
@@ -15,7 +43,7 @@ defmodule Knotra.Checkpoint do
   end
 
   def decode(bytes) when is_binary(bytes) and byte_size(bytes) <= @max_bytes do
-    Enum.each(@structs ++ [Knotra.Execution, Knotra.Loops.Default], &Code.ensure_loaded/1)
+    Enum.each(@structs, &Code.ensure_loaded/1)
 
     try do
       value = :erlang.binary_to_term(bytes, [:safe])
@@ -27,7 +55,8 @@ defmodule Knotra.Checkpoint do
 
   def decode(_), do: {:error, :unsupported_checkpoint}
 
-  defp data?(value) when is_binary(value) or is_atom(value) or is_number(value), do: true
+  defp data?(value) when is_atom(value), do: value in @portable_atoms
+  defp data?(value) when is_binary(value) or is_number(value), do: true
   defp data?([]), do: true
   defp data?([head | tail]), do: data?(head) and list?(tail)
   defp data?(value) when is_tuple(value), do: value |> Tuple.to_list() |> Enum.all?(&data?/1)

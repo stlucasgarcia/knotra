@@ -337,6 +337,114 @@ defmodule Knotra.DurableTest do
     assert F.Ledger.entries() == []
   end
 
+  test "a gated terminal observer cannot retain the active execution slot" do
+    first_definition = %{F.definition(owner: self()) | observer: {F.GatedObserver, self()}}
+
+    assert {:ok, first} =
+             Knotra.submit(__MODULE__, first_definition, "Propose", F.scope(), "gated-first")
+
+    assert_receive {:pending_saved, _observer}, 2_000
+    assert {:ok, %{status: :waiting}} = Knotra.snapshot(__MODULE__, first, F.scope())
+
+    assert {:ok, second} =
+             Knotra.submit(
+               __MODULE__,
+               F.definition(owner: self()),
+               "Propose",
+               F.scope(),
+               "gated-second"
+             )
+
+    assert_receive {:knotra, %{id: ^second, status: :waiting}}, 2_000
+    assert F.Ledger.entries() == []
+  end
+
+  test "runtime-created atoms are rejected before waiting and remain inspectable in a fresh BEAM",
+       %{path: path} do
+    atom =
+      String.to_atom(
+        "runtime_only_#{System.unique_integer([:positive])}_#{System.system_time(:nanosecond)}"
+      )
+
+    definition = F.definition(owner: self(), continuation: atom)
+    assert {:ok, id} = Knotra.submit(__MODULE__, definition, "Propose", F.scope(), "runtime-atom")
+    assert_receive {:knotra, %{id: ^id, status: :blocked, error: :unsupported_checkpoint}}, 2_000
+    refute_receive {:knotra, %{id: ^id, status: :waiting}}
+    stop_supervised(__MODULE__)
+    stop_supervised(Repo)
+    paths = Path.wildcard(Path.expand("_build/test/lib/*/ebin")) |> Enum.flat_map(&["-pa", &1])
+
+    {output, code} =
+      System.cmd(
+        System.find_executable("elixir"),
+        ["--erl", "+S 2:2"] ++ paths ++ ["test/support/recover_pending.ex", path, id, "blocked"],
+        stderr_to_stdout: true
+      )
+
+    assert code == 0, output
+    assert output =~ "RECOVERED_WITHOUT_REPLAY"
+  end
+
+  test "a caller killed after acceptance commit but before acknowledgment can resubmit safely" do
+    owner = self()
+    definition = F.definition(owner: owner)
+
+    {caller, monitor} =
+      spawn_monitor(fn ->
+        Process.put(:acceptance_commit_gate, {owner, "tenant-a", "lost-ack"})
+        result = Knotra.submit(__MODULE__, definition, "Propose", F.scope(), "lost-ack")
+        send(owner, {:unexpected_ack, result})
+      end)
+
+    on_exit(fn -> if Process.alive?(caller), do: Process.exit(caller, :kill) end)
+    assert_receive {:acceptance_committed, ^caller, original_id}, 2_000
+    refute_receive {:model_called, _}
+    Process.exit(caller, :kill)
+    assert_receive {:DOWN, ^monitor, :process, ^caller, :killed}
+    refute_receive {:unexpected_ack, _}
+    assert {:ok, %{status: :accepted}} = Knotra.snapshot(__MODULE__, original_id, F.scope())
+
+    assert {:ok, ^original_id} =
+             Knotra.submit(__MODULE__, definition, "Propose", F.scope(), "lost-ack")
+
+    assert_receive {:model_called, _}, 2_000
+    assert_receive {:knotra, %{id: ^original_id, status: :waiting}}, 2_000
+
+    assert {:ok, ^original_id} =
+             Knotra.submit(__MODULE__, definition, "Propose", F.scope(), "lost-ack")
+
+    refute_receive {:model_called, _}
+    assert F.Ledger.entries() == []
+  end
+
+  test "ReqLLM provider continuation remains checkpointable with portable atoms", %{path: path} do
+    definition = F.provider_definition(self())
+
+    assert {:ok, id} =
+             Knotra.submit(__MODULE__, definition, "Propose", F.scope(), "provider-atoms")
+
+    assert_receive {:knotra, %{id: ^id, status: :waiting}}, 5_000
+
+    assert {:ok, %{exchanges: [%{reply: %{continuation: %ReqLLM.Message{} = message}}]}} =
+             Knotra.checkpoint(__MODULE__, id, F.scope())
+
+    assert [%ReqLLM.ToolCall{function: %{name: "propose"}}] = message.tool_calls
+    assert message.metadata.response_id == "resp_checkpoint"
+    stop_supervised(__MODULE__)
+    stop_supervised(Repo)
+    paths = Path.wildcard(Path.expand("_build/test/lib/*/ebin")) |> Enum.flat_map(&["-pa", &1])
+
+    {output, code} =
+      System.cmd(
+        System.find_executable("elixir"),
+        ["--erl", "+S 2:2"] ++ paths ++ ["test/support/recover_pending.ex", path, id, "provider"],
+        stderr_to_stdout: true
+      )
+
+    assert code == 0, output
+    assert output =~ "RECOVERED_WITHOUT_REPLAY"
+  end
+
   test "nonrecoverable model continuation is visibly blocked, not left running" do
     definition = F.definition(owner: self(), continuation: self())
     assert {:ok, id} = Knotra.submit(__MODULE__, definition, "Propose", F.scope(), "unsafe")
