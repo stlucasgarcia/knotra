@@ -224,6 +224,17 @@ defmodule KnotraTest do
     assert :ok = Knotra.release(execution)
   end
 
+  test "a non-durable runtime cannot return internal non-dispatch evidence", %{auth: auth} do
+    agent =
+      definition(fn _ -> {:ok, %Reply{calls: [call()]}} end,
+        tool_runtime: {FixtureTools, result: {:not_dispatched, :forbidden}}
+      )
+
+    {:ok, execution} = Knotra.start(__MODULE__, agent, "Email", auth)
+    assert %{status: :failed, error: :invalid_plugin_result} = complete(execution)
+    assert :ok = Knotra.release(execution)
+  end
+
   test "loop replacement works without model or tool execution", %{auth: auth} do
     agent =
       definition(fn _ -> flunk("model must not run") end,

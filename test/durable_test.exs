@@ -431,6 +431,25 @@ defmodule Knotra.DurableTest do
     assert F.Ledger.entries() == []
   end
 
+  test "a tool cannot certify non-dispatch after recording its effect" do
+    {id, definition, answer} = pending_answer("forged-non-dispatch")
+    context = Map.put(F.scope(), :effect_reply, {:not_dispatched, :forbidden})
+    assert {:ok, _} = Knotra.answer(__MODULE__, id, definition, context, answer)
+
+    assert_receive {:knotra,
+                    %{
+                      id: ^id,
+                      status: :blocked,
+                      error: :uncertain_effect,
+                      approval: %{operation: %{status: :dispatching, id: operation_id}}
+                    }},
+                   2_000
+
+    assert F.Ledger.operation_ids() == [[operation_id]]
+    assert {:ok, %{status: :blocked}} = Knotra.recover(__MODULE__, id, definition, F.scope())
+    assert F.Ledger.operation_ids() == [[operation_id]]
+  end
+
   test "an authorized rejection ends the attempted operation without an effect" do
     definition = F.definition(owner: self())
     {:ok, id} = Knotra.submit(__MODULE__, definition, "Propose", F.scope(), "reject")

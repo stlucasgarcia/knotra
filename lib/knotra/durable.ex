@@ -301,7 +301,13 @@ defmodule Knotra.Durable do
          true <- module in state.durable.demo_tools and validated === call.arguments,
          {:ok, row} <- Persistence.fetch(state.durable.repo, state.durable.row.tenant, state.id),
          true <- row.revision == state.durable.row.revision and row.status == "running" do
-      module.call(validated, context)
+      # Only the harness can attest non-dispatch. Raw tool returns must not
+      # impersonate that internal result after call/2 has already run.
+      case module.call(validated, context) do
+        {:ok, output} when is_binary(output) -> {:ok, output}
+        {kind, reason} when kind in [:error, :retry] and is_atom(reason) -> {kind, reason}
+        _ -> {:error, :invalid_plugin_result}
+      end
     else
       false -> {:not_dispatched, :approval_mismatch}
       {:error, reason} -> {:not_dispatched, reason}

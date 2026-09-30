@@ -212,7 +212,12 @@ defmodule Knotra.Execution do
     |> observe()
   end
 
-  defp consume({:ok, {:not_dispatched, reason}}, %{stage: {:tool, _}} = state) do
+  defp consume(
+         {:ok, {:not_dispatched, reason}},
+         %{stage: {:tool, _}, durable: durable, approval: %{operation: %{status: :dispatching}}} =
+           state
+       )
+       when not is_nil(durable) and is_atom(reason) do
     state = put_in(state.approval.operation.status, :not_dispatched)
     finish(state, :failed, reason)
   end
