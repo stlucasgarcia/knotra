@@ -198,6 +198,14 @@ defmodule Knotra.DurableTest do
     Agent.update(permission, fn _ -> false end)
     send(task, :continue)
     assert_receive {:knotra, %{id: ^id, status: :failed, error: :forbidden}}, 2_000
+    assert {:error, :already_admitted} = Knotra.cancel(__MODULE__, id, F.scope())
+    stop_supervised(__MODULE__)
+    start_instance()
+    assert {:error, :already_admitted} = Knotra.cancel(__MODULE__, id, F.scope())
+
+    assert {:ok, %{status: :failed, error: :forbidden}} =
+             Knotra.snapshot(__MODULE__, id, F.scope())
+
     assert F.Ledger.entries() == []
   end
 
@@ -375,6 +383,10 @@ defmodule Knotra.DurableTest do
 
     assert {:ok, _} = Knotra.answer(__MODULE__, id, definition, F.scope(), answer)
     assert_receive {:knotra, %{id: ^id, status: :blocked}}, 2_000
+
+    assert {:ok, %{status: :blocked, counts: %{tools: 0}}} =
+             Knotra.cancel(__MODULE__, id, F.scope())
+
     assert F.Ledger.entries() == []
   end
 

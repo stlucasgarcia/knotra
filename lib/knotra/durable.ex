@@ -61,10 +61,9 @@ defmodule Knotra.Durable do
            {:ok, row} <- refresh_expiry(config, row),
            {:ok, snapshot} <- Checkpoint.decode(row.snapshot) do
         cond do
-          match?(
-            %{operation: %{status: status}} when status in [:dispatching, :succeeded],
-            snapshot.approval
-          ) ->
+          # Durable tool count commits atomically with dispatch intent and is
+          # retained even when subsequent authorization refuses invocation.
+          snapshot.counts.tools > 0 ->
             {:error, :already_admitted}
 
           row.status in ["waiting", "decided"] ->
