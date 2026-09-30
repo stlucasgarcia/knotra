@@ -60,6 +60,9 @@ defmodule Knotra do
   @doc "Stops future steps and kills the local task; cannot undo remote effects."
   def cancel(execution), do: GenServer.call(execution, :cancel)
 
+  @doc "Cancels a durable waiting or decided execution before dispatch admission; never rolls back an effect."
+  def cancel(instance, id, context), do: durable_call(:cancel, [instance, id, context])
+
   @doc "Releases a terminal handle and its record. Cancel running work first."
   def release(execution) do
     with {:ok, supervisor} <- GenServer.call(execution, :release) do
@@ -72,7 +75,7 @@ defmodule Knotra do
     durable_call(:submit, [instance, definition, input, context, key, opts])
   end
 
-  @doc "Host-authorized durable public record lookup, independent of a worker PID."
+  @doc "Host-authorized durable record lookup; conditionally persists overdue pending approval expiry."
   def snapshot(instance, id, context) do
     durable_call(:snapshot, [instance, id, context])
   end

@@ -4,10 +4,11 @@ defmodule Knotra.Access do
   context, never model arguments. `:checkpoint` grants access to sensitive private
   continuation data and must be authorized separately from `:inspect`. `:answer`
   permits a responder to decide the identified request, not to bypass fresh tool
-  business authorization.
+  business authorization. `:cancel` permits pre-admission durable cancellation;
+  inspection/recovery/answering also materialize an already-due response expiry.
   """
   @callback authorize(
-              :submit | :inspect | :checkpoint | :recover | :answer,
+              :submit | :inspect | :checkpoint | :recover | :answer | :cancel,
               String.t() | nil,
               term()
             ) ::

@@ -30,7 +30,7 @@ defmodule Knotra.Checkpoint do
     unsupported_tool_call incomplete_response empty_response provider_unavailable
     temporarily_unavailable answered_version decision approve reject rejected approval_rejected
     approved operation decided dispatching succeeded result not_dispatched dispatch_not_started
-    uncertain_effect approval_mismatch
+    uncertain_effect approval_mismatch expired approval_expired
   )a
 
   # Only inert data, never functions, processes, ports or references. Do not decode

@@ -54,10 +54,93 @@ defmodule Knotra.Durable do
     end)
   end
 
+  def cancel(instance, id, context) do
+    protect(fn ->
+      with {:ok, config, tenant} <- access(instance, :cancel, id, context),
+           {:ok, row} <- Persistence.fetch(config.repo, tenant, id),
+           {:ok, row} <- refresh_expiry(config, row),
+           {:ok, snapshot} <- Checkpoint.decode(row.snapshot) do
+        cond do
+          match?(
+            %{operation: %{status: status}} when status in [:dispatching, :succeeded],
+            snapshot.approval
+          ) ->
+            {:error, :already_admitted}
+
+          row.status in ["waiting", "decided"] ->
+            case end_waiting(config, row, snapshot, :cancelled, :cancelled) do
+              {:ok, updated} -> Checkpoint.decode(updated.snapshot)
+              {:error, :stale_execution} -> cancel(instance, id, context)
+              error -> error
+            end
+
+          row.status in ["cancelled", "expired", "rejected", "completed", "failed", "blocked"] ->
+            {:ok, snapshot}
+
+          true ->
+            {:error, :not_waiting}
+        end
+      end
+    end)
+  end
+
+  defp refresh_expiry(config, %{status: "waiting"} = row) do
+    with {:ok, snapshot} <- Checkpoint.decode(row.snapshot) do
+      if snapshot.approval.disposition == :pending and
+           snapshot.approval.expires_at <= System.system_time(:millisecond) do
+        case end_waiting(
+               config,
+               row,
+               snapshot,
+               :expired,
+               :approval_expired,
+               {:expired, snapshot.approval.expires_at}
+             ) do
+          {:error, :stale_execution} ->
+            with {:ok, current} <- Persistence.fetch(config.repo, row.tenant, row.id) do
+              if current.revision == row.revision,
+                do: {:ok, current},
+                else: refresh_expiry(config, current)
+            end
+
+          result ->
+            result
+        end
+      else
+        {:ok, row}
+      end
+    end
+  end
+
+  defp refresh_expiry(_, row), do: {:ok, row}
+
+  defp end_waiting(config, row, snapshot, status, reason, deadline \\ nil) do
+    approval = %{snapshot.approval | disposition: status, version: snapshot.approval.version + 1}
+
+    approval =
+      if approval[:operation],
+        do: put_in(approval.operation.status, :not_dispatched),
+        else: approval
+
+    updated = %{snapshot | status: status, error: reason, approval: approval}
+
+    with {:ok, checkpoint} <- Checkpoint.decode(row.checkpoint),
+         {:ok, saved} <- Checkpoint.encode(%{checkpoint | approval: approval}),
+         {:ok, visible} <- Checkpoint.encode(updated) do
+      Persistence.update(
+        config.repo,
+        row,
+        [status: Atom.to_string(status), checkpoint: saved, snapshot: visible],
+        deadline
+      )
+    end
+  end
+
   def answer(instance, id, definition, context, answer) do
     protect(fn ->
       with {:ok, config, tenant} <- access(instance, :answer, id, context),
            {:ok, row} <- Persistence.fetch(config.repo, tenant, id),
+           {:ok, row} <- refresh_expiry(config, row),
            {:ok, fingerprint} <- composition(definition),
            true <- fingerprint == row.composition,
            {:ok, snapshot} <- Checkpoint.decode(row.snapshot),
@@ -124,6 +207,9 @@ defmodule Knotra.Durable do
     end)
   end
 
+  defp valid_answer(%{status: :cancelled}, _), do: {:error, :execution_cancelled}
+  defp valid_answer(%{status: :expired}, _), do: {:error, :approval_expired}
+
   defp valid_answer(
          %{approval: approval} = snapshot,
          %{request_id: id, version: version, name: name, arguments: args, decision: decision} =
@@ -143,9 +229,6 @@ defmodule Knotra.Durable do
 
       snapshot.status != :waiting ->
         {:error, :not_pending}
-
-      approval.expires_at <= System.system_time(:millisecond) ->
-        {:error, :approval_expired}
 
       true ->
         :ok
@@ -185,7 +268,8 @@ defmodule Knotra.Durable do
   def snapshot(instance, id, context) do
     protect(fn ->
       with {:ok, config, tenant} <- access(instance, :inspect, id, context),
-           {:ok, row} <- Persistence.fetch(config.repo, tenant, id) do
+           {:ok, row} <- Persistence.fetch(config.repo, tenant, id),
+           {:ok, row} <- refresh_expiry(config, row) do
         Checkpoint.decode(row.snapshot)
       end
     end)
@@ -204,9 +288,13 @@ defmodule Knotra.Durable do
     protect(fn ->
       with {:ok, config, tenant} <- access(instance, :recover, id, context),
            {:ok, row} <- Persistence.fetch(config.repo, tenant, id),
+           {:ok, row} <- refresh_expiry(config, row),
            {:ok, fingerprint} <- composition(definition),
            {:ok, checkpoint} <- Checkpoint.decode(row.checkpoint) do
         cond do
+          row.status in ["cancelled", "expired"] ->
+            Checkpoint.decode(row.snapshot)
+
           row.composition != fingerprint or checkpoint[:format] != 1 ->
             block(config, row, :incompatible_checkpoint)
 

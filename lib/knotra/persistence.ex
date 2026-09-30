@@ -81,10 +81,15 @@ if Code.ensure_loaded?(Ecto.Schema) and Code.ensure_loaded?(Ecto.Migration) do
         # SQLite-certified deadline check at the conditional write, including
         # time spent queued for a writer. PostgreSQL certification remains deferred.
         query =
-          if expires_at do
-            where(query, fragment("(julianday('now') - 2440587.5) * 86400000 < ?", ^expires_at))
-          else
-            query
+          case expires_at do
+            nil ->
+              query
+
+            {:expired, deadline} ->
+              where(query, fragment("(julianday('now') - 2440587.5) * 86400000 >= ?", ^deadline))
+
+            deadline when is_integer(deadline) ->
+              where(query, fragment("(julianday('now') - 2440587.5) * 86400000 < ?", ^deadline))
           end
 
         case repo.update_all(query, [set: changes ++ [revision: row.revision + 1]], log: false) do

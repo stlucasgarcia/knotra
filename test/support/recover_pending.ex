@@ -17,14 +17,28 @@ try do
 
   recovered = Knotra.recover(FreshRuntime, id, definition, F.scope())
 
-  if mode == ["blocked"] do
-    {:ok, %{status: :blocked, error: :unsupported_checkpoint}} = recovered
-  else
-    {:ok, %{status: :waiting, approval: %{arguments: %{"amount" => 12}}}} = recovered
+  case mode do
+    ["blocked"] ->
+      {:ok, %{status: :blocked, error: :unsupported_checkpoint}} = recovered
 
-    {:ok,
-     %{exchanges: [%{reply: %Knotra.Reply{continuation: %ReqLLM.Message{}}}], counts: %{turns: 1}}} =
-      Knotra.checkpoint(FreshRuntime, id, F.scope())
+    ["cancelled"] ->
+      {:ok, %{status: :cancelled, error: :cancelled}} = recovered
+
+    ["expired"] ->
+      {:ok, %{status: :expired, error: :approval_expired}} = recovered
+
+      {:ok, %{approval: %{disposition: :expired}}} =
+        Knotra.checkpoint(FreshRuntime, id, F.scope())
+
+    _ ->
+      {:ok, %{status: :waiting, approval: %{arguments: %{"amount" => 12}}}} = recovered
+
+      {:ok,
+       %{
+         exchanges: [%{reply: %Knotra.Reply{continuation: %ReqLLM.Message{}}}],
+         counts: %{turns: 1}
+       }} =
+        Knotra.checkpoint(FreshRuntime, id, F.scope())
   end
 
   receive do

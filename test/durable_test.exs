@@ -450,6 +450,301 @@ defmodule Knotra.DurableTest do
     assert F.Ledger.operation_ids() == [[operation_id]]
   end
 
+  test "durable cancellation survives restart and rejects late answers" do
+    {id, definition, answer} = pending_answer("cancel-waiting")
+
+    assert {:ok, %{status: :cancelled, error: :cancelled}} =
+             Knotra.cancel(__MODULE__, id, F.scope())
+
+    assert {:ok, %{status: :cancelled}} = Knotra.cancel(__MODULE__, id, F.scope())
+    stop_supervised(__MODULE__)
+    start_instance()
+    assert {:ok, %{status: :cancelled}} = Knotra.recover(__MODULE__, id, definition, F.scope())
+
+    assert {:error, :execution_cancelled} =
+             Knotra.answer(__MODULE__, id, definition, F.scope(), answer)
+
+    assert F.Ledger.entries() == []
+  end
+
+  test "inspection persists expiry after the runtime and Repo restart", %{path: path} do
+    {id, definition, answer} = pending_answer("expire-offline")
+    {:ok, snapshot} = Knotra.snapshot(__MODULE__, id, F.scope())
+    {:ok, checkpoint} = Knotra.checkpoint(__MODULE__, id, F.scope())
+    stop_supervised(__MODULE__)
+    F.expire_deadline(id, snapshot, checkpoint)
+    stop_supervised(Repo)
+    start_supervised!({Repo, F.repo_options(path)})
+    start_instance()
+
+    assert {:ok,
+            %{status: :expired, error: :approval_expired, approval: %{disposition: :expired}}} =
+             Knotra.snapshot(__MODULE__, id, F.scope())
+
+    assert {:ok, %{status: :expired}} = Knotra.recover(__MODULE__, id, definition, F.scope())
+
+    assert {:error, :approval_expired} =
+             Knotra.answer(__MODULE__, id, definition, F.scope(), answer)
+
+    assert F.Ledger.entries() == []
+  end
+
+  test "cancellation checks host authority and tenant without changing a waiting request" do
+    {id, _definition, _answer} = pending_answer("cancel-boundaries")
+    {:ok, before} = Knotra.snapshot(__MODULE__, id, F.scope())
+    assert {:error, :forbidden} = Knotra.cancel(__MODULE__, id, %{F.scope() | permissions: []})
+    assert {:error, :not_found} = Knotra.cancel(__MODULE__, id, %{F.scope() | tenant: "other"})
+    assert {:ok, ^before} = Knotra.snapshot(__MODULE__, id, F.scope())
+  end
+
+  test "cancellation committed after decision but before admission fences the delayed worker" do
+    {id, definition, answer} = pending_answer("cancel-decided")
+    gate_storage(:decided)
+    task = Task.async(fn -> Knotra.answer(__MODULE__, id, definition, F.scope(), answer) end)
+    assert_receive {:storage_returned, :decided, caller}, 2_000
+
+    assert {:ok, %{status: :cancelled, approval: %{operation: %{status: :not_dispatched}}}} =
+             Knotra.cancel(__MODULE__, id, F.scope())
+
+    send(caller, :continue)
+    assert {:error, :stale_execution} = Task.await(task)
+
+    assert {:ok, %{status: :cancelled}} =
+             Knotra.recover(__MODULE__, id, %{definition | version: "obsolete"}, F.scope())
+
+    assert {:error, :execution_cancelled} =
+             Knotra.answer(__MODULE__, id, definition, F.scope(), answer)
+
+    assert F.Ledger.entries() == []
+  end
+
+  test "cancellation after admission cannot erase an eventual effect result" do
+    {id, definition, answer} = pending_answer("cancel-too-late")
+    gate_storage(:dispatching)
+    task = Task.async(fn -> Knotra.answer(__MODULE__, id, definition, F.scope(), answer) end)
+    assert_receive {:storage_returned, :dispatching, worker}, 2_000
+    assert {:error, :already_admitted} = Knotra.cancel(__MODULE__, id, F.scope())
+    assert F.Ledger.entries() == []
+    send(worker, :continue)
+    assert {:ok, _} = Task.await(task)
+
+    assert_receive {:knotra,
+                    %{
+                      id: ^id,
+                      status: :completed,
+                      approval: %{operation: %{id: operation_id, result: "fake effect"}}
+                    }},
+                   2_000
+
+    assert F.Ledger.operation_ids() == [[operation_id]]
+    assert {:error, :already_admitted} = Knotra.cancel(__MODULE__, id, F.scope())
+    assert {:ok, %{status: :completed}} = Knotra.snapshot(__MODULE__, id, F.scope())
+  end
+
+  test "cancellation after an uncertain effect preserves its dispatch history across restart" do
+    {id, definition, answer} = pending_answer("cancel-uncertain")
+
+    assert {:ok, _} =
+             Knotra.answer(
+               __MODULE__,
+               id,
+               definition,
+               Map.put(F.scope(), :effect_gate, self()),
+               answer
+             )
+
+    assert_receive {:effect_recorded, _}, 2_000
+    assert {:error, :already_admitted} = Knotra.cancel(__MODULE__, id, F.scope())
+    stop_supervised(__MODULE__)
+    start_instance()
+
+    assert {:ok,
+            %{
+              status: :blocked,
+              error: :uncertain_effect,
+              approval: %{operation: %{id: operation_id}}
+            }} =
+             Knotra.recover(__MODULE__, id, definition, F.scope())
+
+    assert {:error, :already_admitted} = Knotra.cancel(__MODULE__, id, F.scope())
+    assert F.Ledger.operation_ids() == [[operation_id]]
+  end
+
+  test "approve, reject and cancel contenders leave one durable outcome" do
+    {id, definition, answer} = pending_answer("cancel-race")
+
+    results =
+      Task.async_stream(
+        List.duplicate([:approve, :reject, :cancel], 3) |> List.flatten(),
+        fn
+          :cancel ->
+            Knotra.cancel(__MODULE__, id, F.scope())
+
+          decision ->
+            Knotra.answer(__MODULE__, id, definition, F.scope(), %{answer | decision: decision})
+        end,
+        max_concurrency: 8
+      )
+      |> Enum.map(fn {:ok, result} -> result end)
+
+    assert Enum.all?(results, fn
+             {:ok, _} ->
+               true
+
+             {:error, reason} ->
+               reason in [
+                 :execution_cancelled,
+                 :answer_conflict,
+                 :already_admitted,
+                 :stale_execution,
+                 :stale_approval
+               ]
+           end)
+
+    {:ok, snapshot} = Knotra.snapshot(__MODULE__, id, F.scope())
+
+    if snapshot.status in [:running, :decided, :completed] do
+      assert_receive {:knotra, %{id: ^id, status: :completed}}, 2_000
+      assert F.Ledger.entries() == [["unexpected effect"]]
+    else
+      assert snapshot.status in [:cancelled, :rejected]
+      assert F.Ledger.entries() == []
+    end
+  end
+
+  test "concurrent inspection, recovery, answers and cancellation persist expiry once" do
+    {id, definition, answer} = pending_answer("expiry-race")
+    {:ok, snapshot} = Knotra.snapshot(__MODULE__, id, F.scope())
+    {:ok, checkpoint} = Knotra.checkpoint(__MODULE__, id, F.scope())
+    F.expire_deadline(id, snapshot, checkpoint)
+
+    results =
+      Task.async_stream(
+        [:inspect, :recover, :approve, :reject, :cancel, :inspect, :recover],
+        fn
+          :inspect ->
+            Knotra.snapshot(__MODULE__, id, F.scope())
+
+          :recover ->
+            Knotra.recover(__MODULE__, id, definition, F.scope())
+
+          :cancel ->
+            Knotra.cancel(__MODULE__, id, F.scope())
+
+          decision ->
+            Knotra.answer(__MODULE__, id, definition, F.scope(), %{answer | decision: decision})
+        end,
+        max_concurrency: 7
+      )
+      |> Enum.map(fn {:ok, result} -> result end)
+
+    assert Enum.all?(
+             results,
+             &(match?({:ok, %{status: :expired}}, &1) or &1 == {:error, :approval_expired})
+           )
+
+    assert {:ok, %{approval: %{version: 2}, counts: %{tools: 0, turns: 1}}} =
+             Knotra.snapshot(__MODULE__, id, F.scope())
+
+    {:ok, expired_checkpoint} = Knotra.checkpoint(__MODULE__, id, F.scope())
+    assert expired_checkpoint.remaining_ms == checkpoint.remaining_ms
+    assert expired_checkpoint.counts == checkpoint.counts
+    assert F.Ledger.entries() == []
+  end
+
+  test "expiry winning before a queued answer fences that answer" do
+    {id, definition, answer} = pending_answer("expiry-delayed-answer")
+    owner = self()
+
+    task =
+      Task.async(fn ->
+        Process.put(:before_decision_gate, owner)
+        Knotra.answer(__MODULE__, id, definition, F.scope(), answer)
+      end)
+
+    assert_receive {:before_decision, caller}, 2_000
+    {:ok, snapshot} = Knotra.snapshot(__MODULE__, id, F.scope())
+    {:ok, checkpoint} = Knotra.checkpoint(__MODULE__, id, F.scope())
+    F.expire_deadline(id, snapshot, checkpoint)
+    assert {:ok, %{status: :expired}} = Knotra.snapshot(__MODULE__, id, F.scope())
+    send(caller, :continue)
+    assert {:error, :approval_expired} = Task.await(task)
+    assert F.Ledger.entries() == []
+  end
+
+  test "failed cancellation and expiry writes never acknowledge terminal transitions" do
+    {id, definition, answer} = pending_answer("lifecycle-failure")
+
+    Ecto.Adapters.SQL.query!(
+      Repo,
+      "CREATE TRIGGER fail_lifecycle BEFORE UPDATE ON knotra_executions WHEN NEW.status IN ('cancelled', 'expired') BEGIN SELECT RAISE(FAIL, 'offline'); END",
+      [],
+      log: false
+    )
+
+    assert {:error, :persistence_unavailable} = Knotra.cancel(__MODULE__, id, F.scope())
+    assert {:ok, %{status: :waiting} = snapshot} = Knotra.snapshot(__MODULE__, id, F.scope())
+    {:ok, checkpoint} = Knotra.checkpoint(__MODULE__, id, F.scope())
+    F.expire_deadline(id, snapshot, checkpoint)
+    assert {:error, :persistence_unavailable} = Knotra.snapshot(__MODULE__, id, F.scope())
+
+    assert {:error, :persistence_unavailable} =
+             Knotra.answer(__MODULE__, id, definition, F.scope(), answer)
+
+    Ecto.Adapters.SQL.query!(Repo, "DROP TRIGGER fail_lifecycle", [], log: false)
+    assert {:ok, %{status: :expired}} = Knotra.recover(__MODULE__, id, definition, F.scope())
+    assert F.Ledger.entries() == []
+  end
+
+  test "answering alone persists expiry without inspection or a timer" do
+    {id, definition, answer} = pending_answer("answer-expires")
+    {:ok, snapshot} = Knotra.snapshot(__MODULE__, id, F.scope())
+    {:ok, checkpoint} = Knotra.checkpoint(__MODULE__, id, F.scope())
+    F.expire_deadline(id, snapshot, checkpoint)
+
+    assert {:error, :approval_expired} =
+             Knotra.answer(__MODULE__, id, definition, F.scope(), answer)
+
+    assert {:ok, %{approval: %{disposition: :expired}}} =
+             Knotra.checkpoint(__MODULE__, id, F.scope())
+
+    assert F.Ledger.entries() == []
+  end
+
+  test "a fresh BEAM preserves cancellation and discovers offline expiry", %{path: path} do
+    for terminal <- [:cancelled, :expired] do
+      {id, _definition, _answer} = pending_answer("fresh-lifecycle-#{terminal}")
+
+      if terminal == :cancelled do
+        assert {:ok, %{status: :cancelled}} = Knotra.cancel(__MODULE__, id, F.scope())
+      else
+        {:ok, snapshot} = Knotra.snapshot(__MODULE__, id, F.scope())
+        {:ok, checkpoint} = Knotra.checkpoint(__MODULE__, id, F.scope())
+        F.expire_deadline(id, snapshot, checkpoint)
+      end
+
+      stop_supervised(__MODULE__)
+      stop_supervised(Repo)
+      paths = Path.wildcard(Path.expand("_build/test/lib/*/ebin")) |> Enum.flat_map(&["-pa", &1])
+
+      {output, code} =
+        System.cmd(
+          System.find_executable("elixir"),
+          ["--erl", "+S 2:2"] ++
+            paths ++ ["test/support/recover_pending.ex", path, id, Atom.to_string(terminal)],
+          stderr_to_stdout: true
+        )
+
+      assert code == 0, output
+      assert output =~ "RECOVERED_WITHOUT_REPLAY"
+      start_supervised!({Repo, F.repo_options(path)})
+      start_instance()
+      assert {:ok, %{status: ^terminal}} = Knotra.snapshot(__MODULE__, id, F.scope())
+    end
+
+    assert F.Ledger.entries() == []
+  end
+
   test "an authorized rejection ends the attempted operation without an effect" do
     definition = F.definition(owner: self())
     {:ok, id} = Knotra.submit(__MODULE__, definition, "Propose", F.scope(), "reject")

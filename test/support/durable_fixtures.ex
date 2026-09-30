@@ -264,7 +264,10 @@ end
 
 defmodule Knotra.DurableFixtures do
   def scope,
-    do: %{tenant: "tenant-a", permissions: [:submit, :inspect, :recover, :checkpoint, :answer]}
+    do: %{
+      tenant: "tenant-a",
+      permissions: [:submit, :inspect, :recover, :checkpoint, :answer, :cancel]
+    }
 
   def definition(opts \\ []) do
     %Knotra.Definition{
@@ -289,6 +292,24 @@ defmodule Knotra.DurableFixtures do
              ]
            ]}
     }
+  end
+
+  # Controlled stored deadline: simulate elapsed offline time without sleeping
+  # or changing process state. Inputs come from the authorized public interface.
+  def expire_deadline(id, snapshot, checkpoint) do
+    snapshot = put_in(snapshot.approval.expires_at, 0)
+    checkpoint = put_in(checkpoint.approval.expires_at, 0)
+
+    Ecto.Adapters.SQL.query!(
+      Knotra.DurableFixtures.Repo,
+      "UPDATE knotra_executions SET snapshot = ?, checkpoint = ?, revision = revision + 1 WHERE id = ?",
+      [
+        {:blob, :erlang.term_to_binary(snapshot)},
+        {:blob, :erlang.term_to_binary(checkpoint)},
+        id
+      ],
+      log: false
+    )
   end
 
   def repo_options(path) do
