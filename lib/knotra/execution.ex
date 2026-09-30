@@ -173,9 +173,8 @@ defmodule Knotra.Execution do
 
   defp consume({:ok, {:ok, %Knotra.Reply{} = reply}}, %{stage: :model} = state) do
     if valid_reply?(reply, state) and
-         (is_nil(state.durable) or
-            (state.counts.tools == 0 and length(reply.calls) == 1) or
-            (state.counts.tools == 1 and reply.calls == [])) do
+         (is_nil(state.durable) or length(reply.calls) == 1 or
+            (state.counts.tools > 0 and reply.calls == [])) do
       visible = Map.take(reply, [:text, :calls, :usage])
 
       state
@@ -206,9 +205,16 @@ defmodule Knotra.Execution do
           }),
         else: state
 
+    result = %{call: call, output: output}
+
+    result =
+      if state.durable,
+        do: Map.put(result, :operation_id, state.approval.operation.id),
+        else: result
+
     state
     |> Map.merge(%{exchanges: exchanges, last: {:tool, %{call: call, output: output}}})
-    |> event(:tool_result, %{call: call, output: output})
+    |> event(:tool_result, result)
     |> observe()
   end
 
@@ -533,6 +539,12 @@ defmodule Knotra.Execution do
     Process.cancel_timer(state.timer)
     now = System.monotonic_time(:millisecond)
 
+    remaining =
+      case saved.active_deadline_at do
+        nil -> saved.remaining_ms
+        deadline -> min(saved.remaining_ms, max(deadline - System.system_time(:millisecond), 0))
+      end
+
     elapsed =
       case List.last(snapshot.events) do
         nil -> 0
@@ -546,8 +558,8 @@ defmodule Knotra.Execution do
         events: Enum.reverse(snapshot.events),
         tool_definitions: tools,
         started_at: now - elapsed,
-        deadline_at: now + saved.remaining_ms,
-        timer: Process.send_after(self(), :deadline, saved.remaining_ms)
+        deadline_at: now + remaining,
+        timer: Process.send_after(self(), :deadline, remaining)
       })
 
     if state.approval.operation.status == :succeeded,
@@ -571,7 +583,14 @@ defmodule Knotra.Execution do
 
       true ->
         call = %{call | arguments: approval.arguments}
-        state = put_in(state.approval.operation.status, :dispatching)
+
+        state =
+          put_in(state.approval.operation, %{
+            state.approval.operation
+            | status: :dispatching,
+              admitted: true
+          })
+
         state = state |> count(:tools) |> event(:tool_started, %{call: call})
         # Persist dispatch intent before entering the host boundary. The task uses
         # the resulting revision, never the pre-intent row.

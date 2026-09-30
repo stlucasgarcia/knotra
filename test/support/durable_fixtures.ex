@@ -83,7 +83,7 @@ defmodule Knotra.DurableFixtures.StorageGate do
         Enum.any?(metadata.cast_params || metadata.params || [], fn
           value when is_binary(value) ->
             case Knotra.Checkpoint.decode(value) do
-              {:ok, %{format: 1, approval: %{operation: %{status: ^phase}}}} -> true
+              {:ok, %{format: 2, approval: %{operation: %{status: ^phase}}}} -> true
               _ -> false
             end
 
@@ -187,6 +187,50 @@ defmodule Knotra.DurableFixtures.Model do
        continuation: continuation,
        usage: %{input_tokens: 10}
      }}
+  end
+end
+
+defmodule Knotra.DurableFixtures.LegacyModel do
+  @behaviour Knotra.Model
+  def call(_, _), do: {:ok, %Knotra.Reply{text: "legacy"}}
+end
+
+defmodule Knotra.DurableFixtures.RepeatingModel do
+  @behaviour Knotra.Model
+  def checkpoint_version, do: 1
+
+  def call(request, opts) do
+    n = length(request.exchanges)
+    send(opts[:owner], {:repeated_model_attempt, n})
+
+    retry? =
+      if store = opts[:retries] do
+        Agent.get_and_update(store, fn remaining ->
+          {Map.get(remaining, n, 0) > 0, Map.update(remaining, n, 0, &max(&1 - 1, 0))}
+        end)
+      else
+        false
+      end
+
+    cond do
+      retry? ->
+        {:retry, :temporarily_unavailable}
+
+      n < Keyword.get(opts, :operations, 2) ->
+        call = %{id: "call-#{n + 1}", name: "propose", arguments: %{"amount" => 12}}
+
+        {:ok,
+         %Knotra.Reply{
+           calls: [call],
+           continuation:
+             ReqLLM.Context.assistant("",
+               tool_calls: [ReqLLM.ToolCall.new(call.id, call.name, JSON.encode!(call.arguments))]
+             )
+         }}
+
+      true ->
+        {:ok, %Knotra.Reply{text: "Completed: #{n} effects"}}
+    end
   end
 end
 

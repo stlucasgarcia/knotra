@@ -41,25 +41,62 @@ if Code.ensure_loaded?(Ecto.Schema) and Code.ensure_loaded?(Ecto.Migration) do
     import Ecto.Query
     alias Knotra.Persistence.Record
 
-    def accept(repo, attributes) do
+    def accept(repo, attributes, max_pending \\ :infinity) do
       protect(fn ->
-        repo.insert!(struct!(Record, attributes),
-          on_conflict: :nothing,
-          conflict_target: [:tenant, :submission_key],
-          log: false
-        )
+        insert_accepted(repo, attributes, max_pending)
 
         row =
-          repo.get_by!(
+          repo.get_by(
             Record,
             [tenant: attributes.tenant, submission_key: attributes.submission_key],
             log: false
           )
 
-        if row.request_hash == attributes.request_hash,
-          do: {:ok, row},
-          else: {:error, :submission_conflict}
+        cond do
+          row == nil -> {:error, :pending_limit}
+          row.request_hash == attributes.request_hash -> {:ok, row}
+          true -> {:error, :submission_conflict}
+        end
       end)
+    end
+
+    defp insert_accepted(repo, attributes, :infinity) do
+      repo.insert!(struct!(Record, attributes),
+        on_conflict: :nothing,
+        conflict_target: [:tenant, :submission_key],
+        log: false
+      )
+    end
+
+    defp insert_accepted(repo, attributes, limit) when is_integer(limit) and limit > 0 do
+      # ponytail: COUNT scans retained history; use a transactional admission counter if costly.
+      outstanding =
+        from(r in Record,
+          where: r.status not in ["completed", "failed", "cancelled", "expired", "rejected"],
+          select: %{count: count(r.id)}
+        )
+
+      # A single SQLite writer statement makes capacity checking and insertion
+      # atomic. Blocked/reconciliation work still owns capacity; history does not.
+      query =
+        from(c in subquery(outstanding),
+          where: c.count < ^limit,
+          select: %{
+            id: ^attributes.id,
+            tenant: ^attributes.tenant,
+            submission_key: ^attributes.submission_key,
+            request_hash: type(^attributes.request_hash, :binary),
+            composition: type(^attributes.composition, :binary),
+            checkpoint: type(^attributes.checkpoint, :binary),
+            snapshot: type(^attributes.snapshot, :binary)
+          }
+        )
+
+      repo.insert_all(Record, query,
+        on_conflict: :nothing,
+        conflict_target: [:tenant, :submission_key],
+        log: false
+      )
     end
 
     def fetch(repo, tenant, id) do

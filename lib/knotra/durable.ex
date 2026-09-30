@@ -30,21 +30,25 @@ defmodule Knotra.Durable do
            {:ok, saved_snapshot} <- Checkpoint.encode(snapshot),
            {:ok, checkpoint} <-
              Checkpoint.encode(%{
-               format: 1,
+               format: Checkpoint.version(),
                input: input,
                options: limits,
                response_timeout: response_timeout
              }),
            {:ok, row} <-
-             Persistence.accept(config.repo, %{
-               id: id,
-               tenant: tenant,
-               submission_key: key,
-               request_hash: :crypto.hash(:sha256, request),
-               composition: composition,
-               checkpoint: checkpoint,
-               snapshot: saved_snapshot
-             }) do
+             Persistence.accept(
+               config.repo,
+               %{
+                 id: id,
+                 tenant: tenant,
+                 submission_key: key,
+                 request_hash: :crypto.hash(:sha256, request),
+                 composition: composition,
+                 checkpoint: checkpoint,
+                 snapshot: saved_snapshot
+               },
+               config.max_pending
+             ) do
         start_accepted(instance, config, row, definition, context)
         {:ok, row.id}
       else
@@ -61,12 +65,10 @@ defmodule Knotra.Durable do
            {:ok, row} <- refresh_expiry(config, row),
            {:ok, snapshot} <- Checkpoint.decode(row.snapshot) do
         cond do
-          # Durable tool count commits atomically with dispatch intent and is
-          # retained even when subsequent authorization refuses invocation.
-          snapshot.counts.tools > 0 ->
+          admitted?(snapshot) ->
             {:error, :already_admitted}
 
-          row.status in ["waiting", "decided"] ->
+          row.status in ["waiting", "decided", "ready"] ->
             case end_waiting(config, row, snapshot, :cancelled, :cancelled) do
               {:ok, updated} -> Checkpoint.decode(updated.snapshot)
               {:error, :stale_execution} -> cancel(instance, id, context)
@@ -82,6 +84,13 @@ defmodule Knotra.Durable do
       end
     end)
   end
+
+  # V2 pins admission per operation so prior effects do not prevent cancelling
+  # a later waiting request. The count fallback is for inspecting V1 history only.
+  defp admitted?(%{approval: %{operation: operation}, counts: counts}),
+    do: Map.get(operation, :admitted, counts.tools > 0)
+
+  defp admitted?(_), do: false
 
   defp refresh_expiry(config, %{status: "waiting"} = row) do
     with {:ok, snapshot} <- Checkpoint.decode(row.snapshot) do
@@ -140,11 +149,8 @@ defmodule Knotra.Durable do
       with {:ok, config, tenant} <- access(instance, :answer, id, context),
            {:ok, row} <- Persistence.fetch(config.repo, tenant, id),
            {:ok, row} <- refresh_expiry(config, row),
-           {:ok, fingerprint} <- composition(definition),
-           true <- fingerprint == row.composition,
            {:ok, snapshot} <- Checkpoint.decode(row.snapshot),
-           {:ok, checkpoint} <- Checkpoint.decode(row.checkpoint),
-           true <- checkpoint[:format] == 1,
+           {:ok, checkpoint} <- compatible_checkpoint(row, definition),
            :ok <- valid_answer(snapshot, answer),
            :ok <-
              if(answer.decision == :reject or is_map(context),
@@ -153,7 +159,9 @@ defmodule Knotra.Durable do
              ),
            :ok <- demonstration(config, definition, snapshot.approval, answer.decision) do
         if snapshot.approval.disposition != :pending do
-          {:ok, snapshot}
+          if row.status == "ready",
+            do: admit_continuation(instance, config, row, definition, context),
+            else: {:ok, snapshot}
         else
           approval =
             snapshot.approval
@@ -167,14 +175,34 @@ defmodule Knotra.Durable do
 
           approval =
             if answer.decision == :approve,
-              do: Map.put(approval, :operation, %{id: identity(), status: :decided, result: nil}),
+              do:
+                Map.put(approval, :operation, %{
+                  id: identity(),
+                  status: :decided,
+                  result: nil,
+                  admitted: false
+                }),
               else: approval
 
           updated = %{
             snapshot
             | status: if(answer.decision == :approve, do: :decided, else: :rejected),
               error: if(answer.decision == :reject, do: :approval_rejected),
-              approval: approval
+              approval: approval,
+              events:
+                snapshot.events ++
+                  [
+                    %{
+                      sequence: length(snapshot.events) + 1,
+                      elapsed_ms:
+                        case List.last(snapshot.events) do
+                          nil -> 0
+                          event -> event.elapsed_ms
+                        end,
+                      type: :approval_answered,
+                      data: answer
+                    }
+                  ]
           }
 
           with {:ok, saved} <- Checkpoint.encode(%{checkpoint | approval: approval}),
@@ -187,10 +215,7 @@ defmodule Knotra.Durable do
                    snapshot.approval.expires_at
                  ) do
             if answer.decision == :approve do
-              case start_continuation(instance, config, decided, definition, context) do
-                {:ok, _} -> {:ok, updated}
-                _ -> block(config, decided, :dispatch_not_started)
-              end
+              admit_continuation(instance, config, decided, definition, context)
             else
               {:ok, updated}
             end
@@ -200,7 +225,7 @@ defmodule Knotra.Durable do
           end
         end
       else
-        false -> {:error, :incompatible_checkpoint}
+        {:duplicate, snapshot} -> {:ok, snapshot}
         error -> error
       end
     end)
@@ -217,7 +242,17 @@ defmodule Knotra.Durable do
        when is_map(approval) and map_size(answer) == 5 and is_integer(version) and version > 0 and
               decision in [:approve, :reject] do
     cond do
-      approval.id != id or Map.get(approval, :answered_version, approval.version) != version ->
+      approval.id != id ->
+        case Enum.find(
+               snapshot.events,
+               &match?(%{type: :approval_answered, data: %{request_id: ^id}}, &1)
+             ) do
+          %{data: ^answer} -> {:duplicate, snapshot}
+          nil -> {:error, :stale_approval}
+          _ -> {:error, :answer_conflict}
+        end
+
+      Map.get(approval, :answered_version, approval.version) != version ->
         {:error, :stale_approval}
 
       approval.name != name or approval.arguments !== args ->
@@ -243,6 +278,33 @@ defmodule Knotra.Durable do
     if module != nil and module in config.demo_tools, do: :ok, else: {:error, :demonstration_only}
   end
 
+  defp admit_continuation(instance, config, row, definition, context) do
+    case start_continuation(instance, config, row, definition, context) do
+      {:ok, _} ->
+        read_snapshot(config, row.tenant, row.id)
+
+      {:error, :already_running} ->
+        read_snapshot(config, row.tenant, row.id)
+
+      {:error, :max_children} ->
+        if row.status == "ready" do
+          read_snapshot(config, row.tenant, row.id)
+        else
+          with {:ok, snapshot} <- Checkpoint.decode(row.snapshot),
+               {:ok, saved} <- Checkpoint.encode(%{snapshot | status: :ready}),
+               {:ok, _} <- Persistence.update(config.repo, row, status: "ready", snapshot: saved) do
+            read_snapshot(config, row.tenant, row.id)
+          else
+            {:error, :stale_execution} -> read_snapshot(config, row.tenant, row.id)
+            error -> error
+          end
+        end
+
+      _ ->
+        block(config, row, :dispatch_not_started)
+    end
+  end
+
   defp start_continuation(instance, config, row, definition, context) do
     {:ok, saved} = Checkpoint.decode(row.checkpoint)
 
@@ -252,6 +314,7 @@ defmodule Knotra.Durable do
         repo: config.repo,
         row: row,
         resume: true,
+        response_timeout: saved.response_timeout,
         demo_tools: config.demo_tools
       }
 
@@ -288,14 +351,16 @@ defmodule Knotra.Durable do
       with {:ok, config, tenant} <- access(instance, :recover, id, context),
            {:ok, row} <- Persistence.fetch(config.repo, tenant, id),
            {:ok, row} <- refresh_expiry(config, row),
-           {:ok, fingerprint} <- composition(definition),
-           {:ok, checkpoint} <- Checkpoint.decode(row.checkpoint) do
+           {compatibility, checkpoint} <- compatible_checkpoint(row, definition) do
         cond do
-          row.status in ["cancelled", "expired"] ->
+          row.status in ["cancelled", "expired", "completed", "failed", "rejected", "blocked"] ->
             Checkpoint.decode(row.snapshot)
 
-          row.composition != fingerprint or checkpoint[:format] != 1 ->
+          compatibility == :error ->
             block(config, row, :incompatible_checkpoint)
+
+          row.status == "ready" ->
+            admit_continuation(instance, config, row, definition, context)
 
           row.status == "accepted" ->
             with :ok <- supported(definition, checkpoint.input, checkpoint.options) do
@@ -355,8 +420,11 @@ defmodule Knotra.Durable do
   def persist(%{durable: nil} = state), do: {:ok, state}
 
   def persist(state) do
+    remaining = max(state.deadline_at - System.monotonic_time(:millisecond), 0)
+
     checkpoint = %{
-      format: 1,
+      format: Checkpoint.version(),
+      response_timeout: state.durable.response_timeout,
       input: state.input,
       loop_state: state.loop_state,
       exchanges: state.exchanges,
@@ -364,7 +432,9 @@ defmodule Knotra.Durable do
       counts: state.counts,
       limits: state.limits,
       stage: state.stage,
-      remaining_ms: max(state.deadline_at - System.monotonic_time(:millisecond), 0),
+      remaining_ms: remaining,
+      active_deadline_at:
+        if(state.status == :running, do: System.system_time(:millisecond) + remaining),
       approval: state.approval
     }
 
@@ -450,6 +520,62 @@ defmodule Knotra.Durable do
 
   defp supported(_, _, _), do: {:error, :unsupported_composition}
 
+  defp compatible_checkpoint(row, definition) do
+    with {:ok, fingerprint} <- composition(definition),
+         {:ok, saved} <- Checkpoint.decode(row.checkpoint),
+         true <- fingerprint == row.composition and saved[:format] === Checkpoint.version(),
+         true <- valid_checkpoint?(row, saved),
+         :ok <-
+           supported(
+             definition,
+             saved.input,
+             if(row.status == "accepted", do: saved.options, else: Map.to_list(saved.limits))
+           ) do
+      {:ok, saved}
+    else
+      _ -> {:error, :incompatible_checkpoint}
+    end
+  rescue
+    _ -> {:error, :incompatible_checkpoint}
+  end
+
+  defp valid_checkpoint?(%{status: "accepted"}, %{
+         input: input,
+         options: opts,
+         response_timeout: timeout
+       }) do
+    is_binary(input) and Keyword.keyword?(opts) and is_integer(timeout) and timeout > 0
+  end
+
+  defp valid_checkpoint?(row, %{
+         input: input,
+         loop_state: loop,
+         exchanges: exchanges,
+         last: _,
+         stage: stage,
+         approval: _,
+         counts: counts,
+         limits: limits,
+         remaining_ms: remaining,
+         active_deadline_at: deadline,
+         response_timeout: timeout
+       }) do
+    is_binary(input) and is_list(exchanges) and
+      ((is_nil(loop) and stage == :setup) or loop in [:model, :reply, {:tools, []}]) and
+      is_integer(timeout) and timeout > 0 and
+      is_integer(remaining) and remaining >= 0 and remaining <= limits.timeout and
+      (is_nil(deadline) or (is_integer(deadline) and deadline >= 0)) and
+      (row.status != "running" or is_integer(deadline)) and
+      Enum.all?(
+        [turns: :max_turns, tools: :max_tool_calls, retries: :max_retries, steps: :max_steps],
+        fn {key, limit} ->
+          is_integer(counts[key]) and counts[key] >= 0 and counts[key] <= limits[limit]
+        end
+      )
+  end
+
+  defp valid_checkpoint?(_, _), do: false
+
   defp composition(%Knotra.Definition{} = definition) do
     {model, _} = definition.model
     Code.ensure_loaded(model)
@@ -480,7 +606,12 @@ defmodule Knotra.Durable do
 
         case policy.authorize(action, id, context) do
           {:ok, tenant} when is_binary(tenant) and tenant != "" ->
-            {:ok, %{repo: repo, demo_tools: Keyword.get(opts, :demo_tools, [])}, tenant}
+            {:ok,
+             %{
+               repo: repo,
+               demo_tools: Keyword.get(opts, :demo_tools, []),
+               max_pending: Keyword.get(opts, :max_pending, :infinity)
+             }, tenant}
 
           _ ->
             {:error, :forbidden}

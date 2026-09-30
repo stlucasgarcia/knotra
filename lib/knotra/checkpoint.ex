@@ -1,6 +1,7 @@
 defmodule Knotra.Checkpoint do
   @moduledoc false
   @max_bytes 2_000_000
+  def version, do: 2
   @structs [Knotra.Reply, ReqLLM.Message, ReqLLM.Message.ContentPart, ReqLLM.ToolCall]
   # Literal vocabulary is loaded with this module in every fresh VM. Being an
   # existing atom in the writer VM is not proof that a checkpoint is portable.
@@ -30,7 +31,7 @@ defmodule Knotra.Checkpoint do
     unsupported_tool_call incomplete_response empty_response provider_unavailable
     temporarily_unavailable answered_version decision approve reject rejected approval_rejected
     approved operation decided dispatching succeeded result not_dispatched dispatch_not_started
-    uncertain_effect approval_mismatch expired approval_expired
+    uncertain_effect approval_mismatch expired approval_expired ready admitted operation_id active_deadline_at approval_answered request_id
   )a
 
   # Only inert data, never functions, processes, ports or references. Do not decode

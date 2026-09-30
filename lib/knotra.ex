@@ -10,8 +10,9 @@ defmodule Knotra do
 
   `submit/6` is a separate opt-in Ecto path for durable acceptance and pending
   approvals. See `docs/durable-approvals.md`. Neither path provides cross-node
-  ownership. `answer/5` can reject a request or approve one explicitly allowlisted
-  demonstration tool; this is not production consequential-operation support.
+  ownership. `answer/5` can reject a request or approve an explicitly allowlisted
+  demonstration operation. Each subsequent operation needs a fresh approval;
+  this is not production consequential-operation support.
   """
   use Supervisor
 
@@ -31,7 +32,10 @@ defmodule Knotra do
     # ponytail: non-durable terminal handles retain capacity until explicitly released.
     capacity = Keyword.get(opts, :max_executions, 20)
 
-    unless is_atom(name) and is_integer(capacity) and capacity > 0 do
+    pending = Keyword.get(Keyword.get(opts, :durable) || [], :max_pending, :infinity)
+
+    unless is_atom(name) and is_integer(capacity) and capacity > 0 and
+             (pending == :infinity or (is_integer(pending) and pending > 0)) do
       raise ArgumentError
     end
 
@@ -70,7 +74,7 @@ defmodule Knotra do
     end
   end
 
-  @doc "Durably accepts a request. Requires the opt-in Ecto persistence integration."
+  @doc "Durably accepts a request, or returns :pending_limit at the configured outstanding-work bound."
   def submit(instance, definition, input, context, key, opts \\ []) do
     durable_call(:submit, [instance, definition, input, context, key, opts])
   end
@@ -85,7 +89,7 @@ defmodule Knotra do
     durable_call(:checkpoint, [instance, id, context])
   end
 
-  @doc "Recovers accepted work or a committed tool-result continuation; never invents an answer or retries an uncertain effect."
+  @doc "Recovers accepted/ready work or a committed tool-result continuation; never invents an answer or retries an uncertain effect."
   def recover(instance, id, definition, context) do
     durable_call(:recover, [instance, id, definition, context])
   end

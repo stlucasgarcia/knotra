@@ -30,12 +30,13 @@ defmodule Knotra.DurableTest do
     %{path: path, directory: directory, ledger_path: Path.join(directory, "ledger.sqlite3")}
   end
 
-  defp start_instance do
+  defp start_instance(options \\ []) do
     start_supervised!(
       {Knotra,
        name: __MODULE__,
        max_executions: 1,
-       durable: [repo: Repo, access: Knotra.DurableFixtures.Access, demo_tools: [F.Tool]]}
+       durable:
+         [repo: Repo, access: Knotra.DurableFixtures.Access, demo_tools: [F.Tool]] ++ options}
     )
   end
 
@@ -428,7 +429,7 @@ defmodule Knotra.DurableTest do
   test "answering fails closed on an incompatible checkpoint format" do
     {id, definition, answer} = pending_answer("future-format")
     {:ok, checkpoint} = Knotra.checkpoint(__MODULE__, id, F.scope())
-    bytes = :erlang.term_to_binary(%{checkpoint | format: 2})
+    bytes = :erlang.term_to_binary(%{checkpoint | format: 999})
 
     Ecto.Adapters.SQL.query!(
       Repo,
@@ -755,6 +756,455 @@ defmodule Knotra.DurableTest do
     end
 
     assert F.Ledger.entries() == []
+  end
+
+  test "pending capacity rejects new work atomically but preserves matching submissions" do
+    stop_supervised(__MODULE__)
+    start_instance(max_pending: 1)
+    definition = F.definition(owner: self())
+
+    results =
+      Task.async_stream(
+        1..8,
+        fn n ->
+          {n, Knotra.submit(__MODULE__, definition, "Propose", F.scope(), "bounded-#{n}")}
+        end,
+        max_concurrency: 8
+      )
+      |> Enum.map(fn {:ok, result} -> result end)
+
+    assert [{key, {:ok, id}}] = Enum.filter(results, &match?({_, {:ok, _}}, &1))
+    assert 7 == Enum.count(results, &match?({_, {:error, :pending_limit}}, &1))
+    assert_receive {:knotra, %{id: ^id, status: :waiting}}, 2_000
+
+    assert {:ok, ^id} =
+             Knotra.submit(__MODULE__, definition, "Propose", F.scope(), "bounded-#{key}")
+
+    assert {:ok, %{status: :cancelled}} = Knotra.cancel(__MODULE__, id, F.scope())
+
+    assert {:ok, other} =
+             Knotra.submit(__MODULE__, definition, "Propose", F.scope(), "after-slot")
+
+    assert other != id
+
+    assert {:error, :pending_limit} =
+             Knotra.submit(
+               __MODULE__,
+               definition,
+               "Propose",
+               %{F.scope() | tenant: "another"},
+               "global-bound"
+             )
+
+    stop_supervised(__MODULE__)
+    start_instance(max_pending: 1)
+
+    assert {:error, :pending_limit} =
+             Knotra.submit(__MODULE__, definition, "Propose", F.scope(), "after-restart-bound")
+
+    assert F.Ledger.entries() == []
+  end
+
+  test "an approved decision waits for active capacity and resumes once after restart" do
+    {id, definition, answer} = pending_answer("ready-decision")
+    assert_receive {:model_called, _}
+
+    {:ok, _blocker} =
+      Knotra.submit(
+        __MODULE__,
+        F.definition(owner: self(), gated: true),
+        "Hold",
+        F.scope(),
+        "hold-slot"
+      )
+
+    assert_receive {:model_called, _}, 2_000
+    assert {:ok, %{status: :ready}} = Knotra.answer(__MODULE__, id, definition, F.scope(), answer)
+    assert {:ok, %{status: :ready}} = Knotra.answer(__MODULE__, id, definition, F.scope(), answer)
+    assert F.Ledger.entries() == []
+    stop_supervised(__MODULE__)
+    start_instance()
+    assert {:ok, _} = Knotra.recover(__MODULE__, id, definition, F.scope())
+    assert_receive {:knotra, %{id: ^id, status: :completed, counts: %{tools: 1, turns: 2}}}, 2_000
+
+    assert {:ok, %{status: :completed}} =
+             Knotra.answer(__MODULE__, id, definition, F.scope(), answer)
+
+    assert length(F.Ledger.operation_ids()) == 1
+  end
+
+  test "two approval waits preserve shared model retries and attempts through restart" do
+    retries = start_supervised!({Agent, fn -> %{0 => 1, 1 => 1} end})
+
+    definition = %{
+      F.definition(owner: self())
+      | model: {F.RepeatingModel, owner: self(), retries: retries}
+    }
+
+    {:ok, id} =
+      Knotra.submit(__MODULE__, definition, "Propose", F.scope(), "repeated-waits",
+        max_retries: 2,
+        max_turns: 5,
+        max_tool_calls: 2
+      )
+
+    for _ <- 1..2 do
+      assert_receive {:knotra, %{id: ^id, status: :waiting, approval: approval}}, 2_000
+      stop_supervised(__MODULE__)
+      start_instance()
+
+      answer = %{
+        request_id: approval.id,
+        version: approval.version,
+        name: approval.name,
+        arguments: approval.arguments,
+        decision: :approve
+      }
+
+      assert {:ok, _} = Knotra.answer(__MODULE__, id, definition, F.scope(), answer)
+      assert {:ok, _} = Knotra.answer(__MODULE__, id, definition, F.scope(), answer)
+    end
+
+    assert_receive {:knotra,
+                    %{
+                      id: ^id,
+                      status: :completed,
+                      output: "Completed: 2 effects",
+                      counts: %{turns: 5, tools: 2, retries: 2, steps: 6}
+                    }},
+                   2_000
+
+    assert length(F.Ledger.operation_ids()) == 2
+    assert_receive {:repeated_model_attempt, 0}
+    assert_receive {:repeated_model_attempt, 0}
+    assert_receive {:repeated_model_attempt, 1}
+    assert_receive {:repeated_model_attempt, 1}
+    assert_receive {:repeated_model_attempt, 2}
+    refute_receive {:repeated_model_attempt, _}
+  end
+
+  test "running downtime consumes active allowance before restored model work" do
+    {id, definition, answer} = pending_answer("active-downtime")
+    gate_storage(:succeeded)
+    assert {:ok, _} = Knotra.answer(__MODULE__, id, definition, F.scope(), answer)
+    assert_receive {:storage_returned, :succeeded, worker}, 2_000
+    {:ok, saved} = Knotra.checkpoint(__MODULE__, id, F.scope())
+    bytes = :erlang.term_to_binary(Map.put(saved, :active_deadline_at, 0))
+
+    Ecto.Adapters.SQL.query!(
+      Repo,
+      "UPDATE knotra_executions SET checkpoint = ?, revision = revision + 1 WHERE id = ?",
+      [{:blob, bytes}, id],
+      log: false
+    )
+
+    Process.exit(worker, :kill)
+    stop_supervised(__MODULE__)
+    start_instance()
+    assert {:ok, _} = Knotra.recover(__MODULE__, id, definition, F.scope())
+    assert_receive {:knotra, %{id: ^id, status: :failed, error: :deadline_exceeded}}, 2_000
+    refute_receive {:model_resumed, _}
+    assert length(F.Ledger.operation_ids()) == 1
+  end
+
+  test "incompatible or unreadable recovery becomes publicly blocked" do
+    for kind <- [
+          :legacy_model,
+          :old_format,
+          :float_format,
+          :corrupt,
+          :missing_allowance,
+          :loop_state
+        ] do
+      {id, definition, _answer} = pending_answer("compat-#{kind}")
+      {:ok, saved} = Knotra.checkpoint(__MODULE__, id, F.scope())
+
+      definition =
+        if kind == :legacy_model, do: %{definition | model: {F.LegacyModel, []}}, else: definition
+
+      bytes =
+        case kind do
+          :old_format ->
+            :erlang.term_to_binary(%{saved | format: 1})
+
+          :float_format ->
+            :erlang.term_to_binary(%{saved | format: 2.0})
+
+          :loop_state ->
+            :erlang.term_to_binary(%{
+              saved
+              | loop_state: {:tools, [%{id: "invented", name: "propose", arguments: %{}}]}
+            })
+
+          :corrupt ->
+            <<0>>
+
+          :missing_allowance ->
+            :erlang.term_to_binary(Map.delete(saved, :remaining_ms))
+
+          _ ->
+            :erlang.term_to_binary(saved)
+        end
+
+      Ecto.Adapters.SQL.query!(
+        Repo,
+        "UPDATE knotra_executions SET checkpoint = ? WHERE id = ?",
+        [{:blob, bytes}, id],
+        log: false
+      )
+
+      assert {:ok, %{status: :blocked, error: :incompatible_checkpoint}} =
+               Knotra.recover(__MODULE__, id, definition, F.scope())
+
+      assert {:ok, %{status: :blocked, error: :incompatible_checkpoint}} =
+               Knotra.snapshot(__MODULE__, id, F.scope())
+    end
+
+    assert F.Ledger.entries() == []
+  end
+
+  test "resumed attempt and step limits prevent excess model and tool work" do
+    cases = [
+      {:retries_exhausted, [max_retries: 1, max_turns: 8], 1},
+      {:turn_limit, [max_retries: 2, max_turns: 3], 1},
+      {:tool_limit, [max_retries: 2, max_tool_calls: 1], 2},
+      {:step_limit, [max_retries: 2, max_steps: 3], 2}
+    ]
+
+    for {reason, limits, phase_one_attempts} <- cases do
+      retries = start_supervised!({Agent, fn -> %{0 => 1, 1 => 1} end}, id: make_ref())
+
+      definition = %{
+        F.definition(owner: self())
+        | model: {F.RepeatingModel, owner: self(), retries: retries}
+      }
+
+      {:ok, id} =
+        Knotra.submit(__MODULE__, definition, "Propose", F.scope(), "limit-#{reason}", limits)
+
+      assert_receive {:knotra, %{id: ^id, status: :waiting, approval: approval}}, 2_000
+      stop_supervised(__MODULE__)
+      start_instance()
+
+      answer = %{
+        request_id: approval.id,
+        version: approval.version,
+        name: approval.name,
+        arguments: approval.arguments,
+        decision: :approve
+      }
+
+      assert {:ok, _} = Knotra.answer(__MODULE__, id, definition, F.scope(), answer)
+
+      assert_receive {:knotra, %{id: ^id, status: :failed, error: ^reason, counts: %{tools: 1}}},
+                     2_000
+
+      assert {:ok, %{status: :failed}} =
+               Knotra.answer(__MODULE__, id, definition, F.scope(), answer)
+
+      assert {:ok, %{status: :failed}} = Knotra.recover(__MODULE__, id, definition, F.scope())
+      assert_receive {:repeated_model_attempt, 0}
+      assert_receive {:repeated_model_attempt, 0}
+      for _ <- 1..phase_one_attempts, do: assert_receive({:repeated_model_attempt, 1})
+      refute_receive {:repeated_model_attempt, _}
+    end
+
+    assert length(F.Ledger.operation_ids()) == 4
+  end
+
+  test "a later pending approval can be cancelled without erasing a previous effect" do
+    definition = %{F.definition(owner: self()) | model: {F.RepeatingModel, owner: self()}}
+    {:ok, id} = Knotra.submit(__MODULE__, definition, "Propose", F.scope(), "second-cancel")
+    assert_receive {:knotra, %{id: ^id, status: :waiting, approval: first}}, 2_000
+
+    answer = %{
+      request_id: first.id,
+      version: first.version,
+      name: first.name,
+      arguments: first.arguments,
+      decision: :approve
+    }
+
+    assert {:ok, _} = Knotra.answer(__MODULE__, id, definition, F.scope(), answer)
+    assert_receive {:knotra, %{id: ^id, status: :waiting, approval: second}}, 2_000
+    assert first.id != second.id
+
+    assert {:ok, %{status: :waiting, approval: %{id: second_id}}} =
+             Knotra.answer(__MODULE__, id, definition, F.scope(), answer)
+
+    assert second_id == second.id
+
+    assert {:ok, %{status: :cancelled, counts: %{tools: 1}}} =
+             Knotra.cancel(__MODULE__, id, F.scope())
+
+    assert {:ok, %{events: events}} = Knotra.snapshot(__MODULE__, id, F.scope())
+    [%{data: %{operation_id: operation_id}}] = Enum.filter(events, &(&1.type == :tool_result))
+    assert F.Ledger.operation_ids() == [[operation_id]]
+  end
+
+  test "an exhausted frozen active allowance cannot start a tool after human waiting" do
+    {id, definition, answer} = pending_answer("frozen-budget")
+    {:ok, saved} = Knotra.checkpoint(__MODULE__, id, F.scope())
+    assert saved.active_deadline_at == nil
+    bytes = :erlang.term_to_binary(%{saved | remaining_ms: 0})
+
+    Ecto.Adapters.SQL.query!(
+      Repo,
+      "UPDATE knotra_executions SET checkpoint = ? WHERE id = ?",
+      [{:blob, bytes}, id],
+      log: false
+    )
+
+    stop_supervised(__MODULE__)
+    start_instance()
+    assert {:ok, _} = Knotra.answer(__MODULE__, id, definition, F.scope(), answer)
+
+    assert_receive {:knotra,
+                    %{id: ^id, status: :failed, error: :deadline_exceeded, counts: %{tools: 0}}},
+                   2_000
+
+    assert F.Ledger.entries() == []
+  end
+
+  test "checkpoints exclude authority and private provider options and recovery checks fresh authority" do
+    permission = start_supervised!({Agent, fn -> true end})
+    {module, opts} = F.provider_definition(self()).model
+    opts = Keyword.put(opts, :private_option, "PRIVATE_OPTION_CANARY")
+    opts = Keyword.update!(opts, :options, &Keyword.put(&1, :api_key, "CREDENTIAL_CANARY"))
+    definition = %{F.provider_definition(self()) | model: {module, opts}}
+
+    context =
+      Map.merge(F.scope(), %{
+        permission: permission,
+        authorization: fn -> true end,
+        credential: "HOST_AUTH_CANARY",
+        handle: self(),
+        reference: make_ref()
+      })
+
+    {:ok, id} = Knotra.submit(__MODULE__, definition, "Propose", context, "canaries")
+    assert_receive {:knotra, %{id: ^id, status: :waiting, approval: approval}}, 5_000
+    {:ok, saved} = Knotra.checkpoint(__MODULE__, id, F.scope())
+    bytes = :erlang.term_to_binary(saved)
+
+    for canary <- ["PRIVATE_OPTION_CANARY", "CREDENTIAL_CANARY", "HOST_AUTH_CANARY"],
+        do: refute(bytes =~ canary)
+
+    assert Enum.sort(Map.keys(saved)) ==
+             Enum.sort([
+               :format,
+               :input,
+               :response_timeout,
+               :loop_state,
+               :exchanges,
+               :last,
+               :counts,
+               :limits,
+               :stage,
+               :remaining_ms,
+               :active_deadline_at,
+               :approval
+             ])
+
+    stop_supervised(__MODULE__)
+    start_instance()
+    Agent.update(permission, fn _ -> false end)
+
+    answer = %{
+      request_id: approval.id,
+      version: approval.version,
+      name: approval.name,
+      arguments: approval.arguments,
+      decision: :approve
+    }
+
+    assert {:ok, _} =
+             Knotra.answer(
+               __MODULE__,
+               id,
+               definition,
+               Map.put(F.scope(), :permission, permission),
+               answer
+             )
+
+    assert_receive {:knotra, %{id: ^id, status: :failed, error: :forbidden}}, 2_000
+    assert F.Ledger.entries() == []
+  end
+
+  test "blocked work continues to occupy the configured outstanding bound" do
+    stop_supervised(__MODULE__)
+    start_instance(max_pending: 1)
+    definition = F.definition(owner: self(), continuation: self())
+    {:ok, id} = Knotra.submit(__MODULE__, definition, "Propose", F.scope(), "blocked-quota")
+    assert_receive {:knotra, %{id: ^id, status: :blocked}}, 2_000
+
+    assert {:error, :pending_limit} =
+             Knotra.submit(
+               __MODULE__,
+               F.definition(owner: self()),
+               "Propose",
+               F.scope(),
+               "new-quota"
+             )
+
+    assert F.Ledger.entries() == []
+  end
+
+  test "an approved capacity-waiting decision can be cancelled before admission" do
+    {id, definition, answer} = pending_answer("ready-cancel")
+    assert_receive {:model_called, _}
+
+    {:ok, _} =
+      Knotra.submit(
+        __MODULE__,
+        F.definition(owner: self(), gated: true),
+        "Hold",
+        F.scope(),
+        "ready-blocker"
+      )
+
+    assert_receive {:model_called, _}, 2_000
+    assert {:ok, %{status: :ready}} = Knotra.answer(__MODULE__, id, definition, F.scope(), answer)
+    assert {:ok, %{status: :cancelled}} = Knotra.cancel(__MODULE__, id, F.scope())
+    stop_supervised(__MODULE__)
+    start_instance()
+    assert {:ok, %{status: :cancelled}} = Knotra.recover(__MODULE__, id, definition, F.scope())
+
+    assert {:error, :execution_cancelled} =
+             Knotra.answer(__MODULE__, id, definition, F.scope(), answer)
+
+    assert F.Ledger.entries() == []
+  end
+
+  test "actual active time spent before waiting is not replenished by restoration" do
+    definition = F.definition(owner: self(), gated: true)
+
+    {:ok, id} =
+      Knotra.submit(__MODULE__, definition, "Propose", F.scope(), "spent-time", timeout: 5_000)
+
+    assert_receive {:model_called, model_task}, 2_000
+    Process.send_after(model_task, :continue, 50)
+    assert_receive {:knotra, %{id: ^id, status: :waiting, approval: approval}}, 2_000
+    {:ok, before} = Knotra.checkpoint(__MODULE__, id, F.scope())
+    assert before.remaining_ms <= 4_960
+    assert before.active_deadline_at == nil
+    stop_supervised(__MODULE__)
+    start_instance()
+
+    answer = %{
+      request_id: approval.id,
+      version: approval.version,
+      name: approval.name,
+      arguments: approval.arguments,
+      decision: :approve
+    }
+
+    assert {:ok, _} = Knotra.answer(__MODULE__, id, definition, F.scope(), answer)
+    assert_receive {:model_resumed, _}, 2_000
+    assert_receive {:knotra, %{id: ^id, status: :completed}}, 2_000
+    {:ok, after_work} = Knotra.checkpoint(__MODULE__, id, F.scope())
+    assert after_work.remaining_ms <= before.remaining_ms
+    assert F.Ledger.entries() == [["unexpected effect"]]
   end
 
   test "an authorized rejection ends the attempted operation without an effect" do
