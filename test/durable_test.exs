@@ -805,6 +805,44 @@ defmodule Knotra.DurableTest do
     assert F.Ledger.entries() == []
   end
 
+  test "matching resubmission cannot start queued work with an incompatible checkpoint" do
+    {:ok, _} =
+      Knotra.submit(
+        __MODULE__,
+        F.definition(owner: self(), gated: true),
+        "Hold",
+        F.scope(),
+        "legacy-blocker"
+      )
+
+    assert_receive {:model_called, _}, 2_000
+    definition = F.definition(owner: self())
+    {:ok, id} = Knotra.submit(__MODULE__, definition, "Propose", F.scope(), "legacy-accepted")
+    assert {:ok, %{status: :accepted}} = Knotra.snapshot(__MODULE__, id, F.scope())
+    {:ok, saved} = Knotra.checkpoint(__MODULE__, id, F.scope())
+    bytes = :erlang.term_to_binary(%{saved | format: 1})
+
+    Ecto.Adapters.SQL.query!(
+      Repo,
+      "UPDATE knotra_executions SET checkpoint = ? WHERE id = ?",
+      [{:blob, bytes}, id],
+      log: false
+    )
+
+    stop_supervised(__MODULE__)
+    start_instance()
+
+    assert {:ok, ^id} =
+             Knotra.submit(__MODULE__, definition, "Propose", F.scope(), "legacy-accepted")
+
+    assert {:ok, %{status: :blocked, error: :incompatible_checkpoint}} =
+             Knotra.snapshot(__MODULE__, id, F.scope())
+
+    refute_receive {:model_called, _}
+    assert F.Ledger.entries() == []
+    assert {:ok, %{format: 1}} = Knotra.checkpoint(__MODULE__, id, F.scope())
+  end
+
   test "an approved decision waits for active capacity and resumes once after restart" do
     {id, definition, answer} = pending_answer("ready-decision")
     assert_receive {:model_called, _}

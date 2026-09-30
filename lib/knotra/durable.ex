@@ -397,20 +397,24 @@ defmodule Knotra.Durable do
   end
 
   defp start_accepted(instance, config, %{status: "accepted"} = row, definition, context) do
-    {:ok, saved} = Checkpoint.decode(row.checkpoint)
+    case compatible_checkpoint(row, definition) do
+      {:ok, saved} ->
+        metadata = %{
+          instance: instance,
+          repo: config.repo,
+          row: row,
+          response_timeout: saved.response_timeout
+        }
 
-    metadata = %{
-      instance: instance,
-      repo: config.repo,
-      row: row,
-      response_timeout: saved.response_timeout
-    }
+        DynamicSupervisor.start_child(
+          via(instance, :executions),
+          {Knotra.Execution,
+           {via(instance, :tasks), definition, saved.input, context, saved.options, metadata}}
+        )
 
-    DynamicSupervisor.start_child(
-      via(instance, :executions),
-      {Knotra.Execution,
-       {via(instance, :tasks), definition, saved.input, context, saved.options, metadata}}
-    )
+      {:error, :incompatible_checkpoint} ->
+        block(config, row, :incompatible_checkpoint)
+    end
   end
 
   defp start_accepted(_, _, _, _, _), do: :ok
