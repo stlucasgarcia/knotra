@@ -71,12 +71,21 @@ if Code.ensure_loaded?(Ecto.Schema) and Code.ensure_loaded?(Ecto.Migration) do
       end)
     end
 
-    def update(repo, row, changes) do
+    def update(repo, row, changes, expires_at \\ nil) do
       protect(fn ->
         query =
           from(r in Record,
             where: r.id == ^row.id and r.tenant == ^row.tenant and r.revision == ^row.revision
           )
+
+        # SQLite-certified deadline check at the conditional write, including
+        # time spent queued for a writer. PostgreSQL certification remains deferred.
+        query =
+          if expires_at do
+            where(query, fragment("(julianday('now') - 2440587.5) * 86400000 < ?", ^expires_at))
+          else
+            query
+          end
 
         case repo.update_all(query, [set: changes ++ [revision: row.revision + 1]], log: false) do
           {1, _} -> {:ok, struct(row, changes ++ [revision: row.revision + 1])}

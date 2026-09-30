@@ -45,8 +45,11 @@ defmodule Knotra.Tool do
   authorization. JSON schema describes the tool to the provider; it is not a
   substitute for host-side validation (ReqLLM does not enforce map schemas).
   Implementations used by `start/5` must be repeatable reads. The opt-in durable
-  path also accepts `read_only: false` definitions for proposals, but never calls
-  their `call/2` function. Declaring read-only is not a sandbox.
+  path also accepts `read_only: false` definitions for proposals. Only an explicitly
+  allowlisted demonstration tool may execute after a bound approval and fresh
+  authorization. Its map context includes `:knotra_operation_id` for the stable
+  operation identity. Effect retries are blocked, even if `call/2` requests one.
+  Declaring read-only or allowlisting a module is not a sandbox.
   Results are strings so their representation is explicit at the model boundary.
   """
   @callback definition() :: map()

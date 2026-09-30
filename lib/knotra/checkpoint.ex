@@ -28,7 +28,9 @@ defmodule Knotra.Checkpoint do
     persistence_failed incompatible_checkpoint interrupted unknown_tool
     write_tool_not_supported forbidden invalid_arguments model_error
     unsupported_tool_call incomplete_response empty_response provider_unavailable
-    temporarily_unavailable
+    temporarily_unavailable answered_version decision approve reject rejected approval_rejected
+    approved operation decided dispatching succeeded result not_dispatched dispatch_not_started
+    uncertain_effect approval_mismatch
   )a
 
   # Only inert data, never functions, processes, ports or references. Do not decode

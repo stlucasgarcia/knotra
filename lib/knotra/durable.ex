@@ -54,6 +54,134 @@ defmodule Knotra.Durable do
     end)
   end
 
+  def answer(instance, id, definition, context, answer) do
+    protect(fn ->
+      with {:ok, config, tenant} <- access(instance, :answer, id, context),
+           {:ok, row} <- Persistence.fetch(config.repo, tenant, id),
+           {:ok, fingerprint} <- composition(definition),
+           true <- fingerprint == row.composition,
+           {:ok, snapshot} <- Checkpoint.decode(row.snapshot),
+           {:ok, checkpoint} <- Checkpoint.decode(row.checkpoint),
+           true <- checkpoint[:format] == 1,
+           :ok <- valid_answer(snapshot, answer),
+           :ok <-
+             if(answer.decision == :reject or is_map(context),
+               do: :ok,
+               else: {:error, :invalid_context}
+             ),
+           :ok <- demonstration(config, definition, snapshot.approval, answer.decision) do
+        if snapshot.approval.disposition != :pending do
+          {:ok, snapshot}
+        else
+          approval =
+            snapshot.approval
+            |> Map.put(:answered_version, answer.version)
+            |> Map.put(:decision, answer.decision)
+            |> Map.put(:version, answer.version + 1)
+            |> Map.put(
+              :disposition,
+              if(answer.decision == :approve, do: :approved, else: :rejected)
+            )
+
+          approval =
+            if answer.decision == :approve,
+              do: Map.put(approval, :operation, %{id: identity(), status: :decided, result: nil}),
+              else: approval
+
+          updated = %{
+            snapshot
+            | status: if(answer.decision == :approve, do: :decided, else: :rejected),
+              error: if(answer.decision == :reject, do: :approval_rejected),
+              approval: approval
+          }
+
+          with {:ok, saved} <- Checkpoint.encode(%{checkpoint | approval: approval}),
+               {:ok, visible} <- Checkpoint.encode(updated),
+               {:ok, decided} <-
+                 Persistence.update(
+                   config.repo,
+                   row,
+                   [status: Atom.to_string(updated.status), checkpoint: saved, snapshot: visible],
+                   snapshot.approval.expires_at
+                 ) do
+            if answer.decision == :approve do
+              case start_continuation(instance, config, decided, definition, context) do
+                {:ok, _} -> {:ok, updated}
+                _ -> block(config, decided, :dispatch_not_started)
+              end
+            else
+              {:ok, updated}
+            end
+          else
+            {:error, :stale_execution} -> answer(instance, id, definition, context, answer)
+            error -> error
+          end
+        end
+      else
+        false -> {:error, :incompatible_checkpoint}
+        error -> error
+      end
+    end)
+  end
+
+  defp valid_answer(
+         %{approval: approval} = snapshot,
+         %{request_id: id, version: version, name: name, arguments: args, decision: decision} =
+           answer
+       )
+       when is_map(approval) and map_size(answer) == 5 and is_integer(version) and version > 0 and
+              decision in [:approve, :reject] do
+    cond do
+      approval.id != id or Map.get(approval, :answered_version, approval.version) != version ->
+        {:error, :stale_approval}
+
+      approval.name != name or approval.arguments !== args ->
+        {:error, :approval_mismatch}
+
+      approval.disposition != :pending ->
+        if approval[:decision] == decision, do: :ok, else: {:error, :answer_conflict}
+
+      snapshot.status != :waiting ->
+        {:error, :not_pending}
+
+      approval.expires_at <= System.system_time(:millisecond) ->
+        {:error, :approval_expired}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp valid_answer(_, _), do: {:error, :invalid_answer}
+
+  defp demonstration(_config, _definition, _approval, :reject), do: :ok
+
+  defp demonstration(config, definition, approval, :approve) do
+    module = Enum.find(definition.tools, &(&1.definition().name == approval.name))
+    if module != nil and module in config.demo_tools, do: :ok, else: {:error, :demonstration_only}
+  end
+
+  defp start_continuation(instance, config, row, definition, context) do
+    {:ok, saved} = Checkpoint.decode(row.checkpoint)
+
+    with :ok <- supported(definition, saved.input, Map.to_list(saved.limits)) do
+      metadata = %{
+        instance: instance,
+        repo: config.repo,
+        row: row,
+        resume: true,
+        demo_tools: config.demo_tools
+      }
+
+      DynamicSupervisor.start_child(
+        via(instance, :executions),
+        {Knotra.Execution,
+         {via(instance, :tasks), definition, saved.input, context, Map.to_list(saved.limits),
+          metadata}}
+      )
+    end
+  end
+
   def snapshot(instance, id, context) do
     protect(fn ->
       with {:ok, config, tenant} <- access(instance, :inspect, id, context),
@@ -88,8 +216,21 @@ defmodule Knotra.Durable do
               read_snapshot(config, tenant, id)
             end
 
-          row.status == "running" and Registry.lookup(instance, {:durable, id}) == [] ->
-            block(config, row, :interrupted)
+          row.status in ["running", "decided"] and Registry.lookup(instance, {:durable, id}) == [] ->
+            cond do
+              match?(%{approval: %{operation: %{status: :dispatching}}}, checkpoint) ->
+                block(config, row, :uncertain_effect)
+
+              match?(
+                %{approval: %{operation: %{status: :succeeded}}, stage: :observation},
+                checkpoint
+              ) ->
+                start_continuation(instance, config, row, definition, context)
+                read_snapshot(config, tenant, id)
+
+              true ->
+                block(config, row, :interrupted)
+            end
 
           true ->
             Checkpoint.decode(row.snapshot)
@@ -152,6 +293,21 @@ defmodule Knotra.Durable do
     end
   end
 
+  def dispatch(state, call) do
+    context = Map.put(state.auth, :knotra_operation_id, state.approval.operation.id)
+
+    with {:ok, module, validated} <-
+           Knotra.ToolRuntimes.Default.prepare(call, state.definition.tools, context, true),
+         true <- module in state.durable.demo_tools and validated === call.arguments,
+         {:ok, row} <- Persistence.fetch(state.durable.repo, state.durable.row.tenant, state.id),
+         true <- row.revision == state.durable.row.revision and row.status == "running" do
+      module.call(validated, context)
+    else
+      false -> {:not_dispatched, :approval_mismatch}
+      {:error, reason} -> {:not_dispatched, reason}
+    end
+  end
+
   def approval(call, tools, auth) do
     with {:ok, _tool, validated} <- Knotra.ToolRuntimes.Default.prepare(call, tools, auth, true) do
       {:ok,
@@ -166,8 +322,16 @@ defmodule Knotra.Durable do
     end
   end
 
-  def block_failed(state, reason),
-    do: block(%{repo: state.durable.repo}, state.durable.row, reason)
+  def block_failed(state, reason) do
+    {:ok, checkpoint} = Checkpoint.decode(state.durable.row.checkpoint)
+
+    reason =
+      if match?(%{approval: %{operation: %{status: :dispatching}}}, checkpoint),
+        do: :uncertain_effect,
+        else: reason
+
+    block(%{repo: state.durable.repo}, state.durable.row, reason)
+  end
 
   defp block(config, row, reason) do
     with {:ok, snapshot} <- Checkpoint.decode(row.snapshot),
@@ -222,8 +386,11 @@ defmodule Knotra.Durable do
         repo = Keyword.fetch!(opts, :repo)
 
         case policy.authorize(action, id, context) do
-          {:ok, tenant} when is_binary(tenant) and tenant != "" -> {:ok, %{repo: repo}, tenant}
-          _ -> {:error, :forbidden}
+          {:ok, tenant} when is_binary(tenant) and tenant != "" ->
+            {:ok, %{repo: repo, demo_tools: Keyword.get(opts, :demo_tools, [])}, tenant}
+
+          _ ->
+            {:error, :forbidden}
         end
 
       _ ->

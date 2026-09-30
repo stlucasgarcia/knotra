@@ -27,7 +27,7 @@ defmodule Knotra.DurableTest do
     stop_supervised(Repo)
     start_supervised!({Repo, F.repo_options(path)})
     start_instance()
-    %{path: path, directory: directory}
+    %{path: path, directory: directory, ledger_path: Path.join(directory, "ledger.sqlite3")}
   end
 
   defp start_instance do
@@ -35,8 +35,422 @@ defmodule Knotra.DurableTest do
       {Knotra,
        name: __MODULE__,
        max_executions: 1,
-       durable: [repo: Repo, access: Knotra.DurableFixtures.Access]}
+       durable: [repo: Repo, access: Knotra.DurableFixtures.Access, demo_tools: [F.Tool]]}
     )
+  end
+
+  test "approval after restart executes one fake effect and continues the saved conversation", %{
+    path: path
+  } do
+    definition = F.definition(owner: self())
+    {:ok, id} = Knotra.submit(__MODULE__, definition, "Propose", F.scope(), "approve")
+    assert_receive {:knotra, %{id: ^id, status: :waiting, approval: approval}}, 2_000
+    stop_supervised(__MODULE__)
+    stop_supervised(Repo)
+    # The independent effect ledger remains alive during execution recovery.
+    start_supervised!({Repo, F.repo_options(path)})
+    start_instance()
+
+    answer = %{
+      request_id: approval.id,
+      version: approval.version,
+      name: approval.name,
+      arguments: approval.arguments,
+      decision: :approve
+    }
+
+    assert {:ok, _} = Knotra.answer(__MODULE__, id, definition, F.scope(), answer)
+
+    assert_receive {:knotra,
+                    %{
+                      id: ^id,
+                      status: :completed,
+                      output: "Completed: fake effect",
+                      counts: %{turns: 2, tools: 1, steps: 4}
+                    }},
+                   2_000
+
+    assert F.Ledger.entries() == [["unexpected effect"]]
+  end
+
+  test "an interrupted admitted effect is blocked, never automatically retried" do
+    {id, definition, answer} = pending_answer("uncertain")
+    context = Map.put(F.scope(), :effect_gate, self())
+    assert {:ok, _} = Knotra.answer(__MODULE__, id, definition, context, answer)
+    assert_receive {:effect_recorded, _}, 2_000
+    stop_supervised(__MODULE__)
+    start_instance()
+
+    assert {:ok, %{status: :blocked, error: :uncertain_effect}} =
+             Knotra.recover(__MODULE__, id, definition, F.scope())
+
+    assert {:ok, %{status: :blocked}} =
+             Knotra.answer(__MODULE__, id, definition, F.scope(), answer)
+
+    assert {:ok, %{status: :blocked}} = Knotra.recover(__MODULE__, id, definition, F.scope())
+    assert F.Ledger.entries() == [["unexpected effect"]]
+  end
+
+  test "answer identity, exact arguments, permission and tenant boundaries prevent dispatch" do
+    {id, definition, answer} = pending_answer("boundaries")
+
+    for bad <- [%{answer | arguments: %{"amount" => 12.0}}, %{answer | name: "invented"}] do
+      assert {:error, :approval_mismatch} =
+               Knotra.answer(__MODULE__, id, definition, F.scope(), bad)
+    end
+
+    for bad <- [%{answer | version: 9}, %{answer | request_id: "other"}] do
+      assert {:error, :stale_approval} = Knotra.answer(__MODULE__, id, definition, F.scope(), bad)
+    end
+
+    assert {:error, :forbidden} =
+             Knotra.answer(__MODULE__, id, definition, %{F.scope() | permissions: []}, answer)
+
+    assert {:error, :not_found} =
+             Knotra.answer(__MODULE__, id, definition, %{F.scope() | tenant: "other"}, answer)
+
+    assert {:ok, %{status: :waiting}} = Knotra.snapshot(__MODULE__, id, F.scope())
+    assert F.Ledger.entries() == []
+  end
+
+  test "concurrent conflicting and duplicate answers dispatch at most once" do
+    {id, definition, answer} = pending_answer("race-answer")
+    decisions = List.duplicate(answer, 4) ++ List.duplicate(%{answer | decision: :reject}, 4)
+
+    results =
+      Task.async_stream(
+        decisions,
+        fn a -> Knotra.answer(__MODULE__, id, definition, F.scope(), a) end,
+        max_concurrency: 8,
+        ordered: false
+      )
+      |> Enum.map(fn {:ok, result} -> result end)
+
+    assert Enum.any?(results, &match?({:ok, _}, &1))
+    assert Enum.all?(results, &(match?({:ok, _}, &1) or &1 == {:error, :answer_conflict}))
+    {:ok, snapshot} = Knotra.snapshot(__MODULE__, id, F.scope())
+
+    if snapshot.approval.decision == :approve do
+      assert_receive {:knotra, %{id: ^id, status: :completed}}, 2_000
+      assert F.Ledger.entries() == [["unexpected effect"]]
+    else
+      assert snapshot.status == :rejected
+      assert F.Ledger.entries() == []
+    end
+
+    repeated = %{answer | decision: snapshot.approval.decision}
+    assert {:ok, _} = Knotra.answer(__MODULE__, id, definition, F.scope(), repeated)
+  end
+
+  test "a decision committed before a lost answer acknowledgment is not dispatched on recovery" do
+    {id, definition, answer} = pending_answer("decision-crash")
+    gate_storage(:decided)
+
+    {caller, monitor} =
+      spawn_monitor(fn -> Knotra.answer(__MODULE__, id, definition, F.scope(), answer) end)
+
+    assert_receive {:storage_returned, :decided, ^caller}, 2_000
+    Process.exit(caller, :kill)
+    assert_receive {:DOWN, ^monitor, :process, ^caller, :killed}
+    assert {:ok, %{status: :decided}} = Knotra.snapshot(__MODULE__, id, F.scope())
+
+    assert {:ok, %{status: :blocked, error: :interrupted}} =
+             Knotra.recover(__MODULE__, id, definition, F.scope())
+
+    assert {:ok, %{status: :blocked}} =
+             Knotra.answer(__MODULE__, id, definition, F.scope(), answer)
+
+    assert F.Ledger.entries() == []
+  end
+
+  test "a committed tool result restores the loop without repeating the effect" do
+    {id, definition, answer} = pending_answer("result-crash")
+    gate_storage(:succeeded)
+    assert {:ok, _} = Knotra.answer(__MODULE__, id, definition, F.scope(), answer)
+    assert_receive {:storage_returned, :succeeded, worker}, 2_000
+    Process.exit(worker, :kill)
+    stop_supervised(__MODULE__)
+    start_instance()
+    assert {:ok, _} = Knotra.recover(__MODULE__, id, definition, F.scope())
+
+    assert_receive {:knotra,
+                    %{
+                      id: ^id,
+                      status: :completed,
+                      output: "Completed: fake effect",
+                      counts: %{turns: 2, tools: 1, steps: 4}
+                    }},
+                   2_000
+
+    assert F.Ledger.entries() == [["unexpected effect"]]
+  end
+
+  test "revocation after decision and intent recording prevents dispatch" do
+    {id, definition, answer} = pending_answer("revocation")
+    permission = start_supervised!({Agent, fn -> true end})
+    context = Map.merge(F.scope(), %{permission: permission, authorize_gate: self()})
+    assert {:ok, _} = Knotra.answer(__MODULE__, id, definition, context, answer)
+    assert_receive {:business_authorizing, task}, 2_000
+
+    assert {:ok, %{approval: %{disposition: :approved, operation: %{status: :dispatching}}}} =
+             Knotra.snapshot(__MODULE__, id, F.scope())
+
+    Agent.update(permission, fn _ -> false end)
+    send(task, :continue)
+    assert_receive {:knotra, %{id: ^id, status: :failed, error: :forbidden}}, 2_000
+    assert F.Ledger.entries() == []
+  end
+
+  test "an answer that expires before its conditional write cannot consume approval" do
+    {id, definition, answer} = pending_answer("expiry", response_timeout: 1_000)
+    {:ok, %{approval: approval}} = Knotra.snapshot(__MODULE__, id, F.scope())
+    owner = self()
+
+    task =
+      Task.async(fn ->
+        Process.put(:before_decision_gate, owner)
+        Knotra.answer(__MODULE__, id, definition, F.scope(), answer)
+      end)
+
+    assert_receive {:before_decision, caller}, 500
+
+    receive do
+    after
+      max(approval.expires_at - System.system_time(:millisecond) + 2, 0) -> :ok
+    end
+
+    send(caller, :continue)
+    assert {:error, :approval_expired} = Task.await(task)
+    assert F.Ledger.entries() == []
+  end
+
+  test "a stale tool result cannot overwrite a newer blocked revision" do
+    {id, definition, answer} = pending_answer("stale-result")
+
+    assert {:ok, _} =
+             Knotra.answer(
+               __MODULE__,
+               id,
+               definition,
+               Map.put(F.scope(), :effect_gate, self()),
+               answer
+             )
+
+    assert_receive {:effect_recorded, effect_task}, 2_000
+
+    assert {:ok, %{status: :blocked, error: :incompatible_checkpoint}} =
+             Knotra.recover(__MODULE__, id, %{definition | version: "changed"}, F.scope())
+
+    gate_storage(:succeeded)
+    send(effect_task, :continue)
+    assert_receive {:storage_returned, :succeeded, worker}, 2_000
+
+    assert {:ok, %{status: :blocked, error: :incompatible_checkpoint}} =
+             Knotra.snapshot(__MODULE__, id, F.scope())
+
+    Process.exit(worker, :kill)
+    assert F.Ledger.entries() == [["unexpected effect"]]
+  end
+
+  test "dispatch intent survives a crash before the host call without automatic retry" do
+    {id, definition, answer} = pending_answer("intent-crash")
+    gate_storage(:dispatching)
+
+    {caller, monitor} =
+      spawn_monitor(fn -> Knotra.answer(__MODULE__, id, definition, F.scope(), answer) end)
+
+    assert_receive {:storage_returned, :dispatching, worker}, 2_000
+    Process.exit(worker, :kill)
+    assert_receive {:DOWN, ^monitor, :process, ^caller, _}, 2_000
+
+    assert {:ok, %{status: :blocked, error: :uncertain_effect}} =
+             Knotra.recover(__MODULE__, id, definition, F.scope())
+
+    assert F.Ledger.entries() == []
+  end
+
+  test "a recorded fake effect has stable identity and a retry reply does not retry it" do
+    {id, definition, answer} = pending_answer("no-effect-retry", max_retries: 3)
+    context = Map.put(F.scope(), :effect_reply, {:retry, :temporarily_unavailable})
+    assert {:ok, _} = Knotra.answer(__MODULE__, id, definition, context, answer)
+
+    assert_receive {:knotra,
+                    %{
+                      id: ^id,
+                      status: :blocked,
+                      error: :uncertain_effect,
+                      approval: %{operation: %{id: operation_id}},
+                      counts: %{tools: 1, retries: 0}
+                    }},
+                   2_000
+
+    assert F.Ledger.operation_ids() == [[operation_id]]
+    assert {:ok, %{status: :blocked}} = Knotra.recover(__MODULE__, id, definition, F.scope())
+    assert F.Ledger.operation_ids() == [[operation_id]]
+  end
+
+  test "continuation does not reset the consumed model budget" do
+    {id, definition, answer} = pending_answer("turn-budget", max_turns: 1)
+    assert {:ok, _} = Knotra.answer(__MODULE__, id, definition, F.scope(), answer)
+
+    assert_receive {:knotra,
+                    %{id: ^id, status: :failed, error: :turn_limit, counts: %{turns: 1, tools: 1}}},
+                   2_000
+
+    assert F.Ledger.entries() == [["unexpected effect"]]
+  end
+
+  test "durable approval cannot execute without an explicit demonstration allowlist" do
+    {id, definition, answer} = pending_answer("no-allowlist")
+    stop_supervised(__MODULE__)
+    start_supervised!({Knotra, name: __MODULE__, durable: [repo: Repo, access: F.Access]})
+
+    assert {:error, :demonstration_only} =
+             Knotra.answer(__MODULE__, id, definition, F.scope(), answer)
+
+    assert {:ok, %{status: :waiting}} = Knotra.snapshot(__MODULE__, id, F.scope())
+    assert F.Ledger.entries() == []
+  end
+
+  test "a fresh BEAM answers with the restored provider continuation and independent ledger", %{
+    path: path,
+    ledger_path: ledger_path
+  } do
+    definition = F.provider_definition(self())
+    {:ok, id} = Knotra.submit(__MODULE__, definition, "Propose", F.scope(), "fresh-answer")
+    assert_receive {:knotra, %{id: ^id, status: :waiting}}, 5_000
+    stop_supervised(__MODULE__)
+    stop_supervised(Repo)
+    paths = Path.wildcard(Path.expand("_build/test/lib/*/ebin")) |> Enum.flat_map(&["-pa", &1])
+
+    {output, code} =
+      System.cmd(
+        System.find_executable("elixir"),
+        ["--erl", "+S 2:2"] ++ paths ++ ["test/support/answer_pending.ex", path, ledger_path, id],
+        stderr_to_stdout: true
+      )
+
+    assert code == 0, output
+    assert output =~ "ANSWERED_AFTER_FRESH_BEAM"
+    assert F.Ledger.entries() == [["unexpected effect"]]
+    start_supervised!({Repo, F.repo_options(path)})
+    start_instance()
+
+    assert {:ok, %{status: :completed, counts: %{tools: 1, turns: 2}}} =
+             Knotra.recover(__MODULE__, id, definition, F.scope())
+  end
+
+  test "a failed decision commit leaves the original approval answerable" do
+    {id, definition, answer} = pending_answer("failed-decision")
+
+    Ecto.Adapters.SQL.query!(
+      Repo,
+      "CREATE TRIGGER fail_decision BEFORE UPDATE ON knotra_executions WHEN NEW.status = 'decided' BEGIN SELECT RAISE(FAIL, 'offline'); END",
+      [],
+      log: false
+    )
+
+    assert {:error, :persistence_unavailable} =
+             Knotra.answer(__MODULE__, id, definition, F.scope(), answer)
+
+    assert {:ok, %{status: :waiting, approval: %{version: 1, disposition: :pending}}} =
+             Knotra.snapshot(__MODULE__, id, F.scope())
+
+    assert F.Ledger.entries() == []
+    Ecto.Adapters.SQL.query!(Repo, "DROP TRIGGER fail_decision", [], log: false)
+    assert {:ok, _} = Knotra.answer(__MODULE__, id, definition, F.scope(), answer)
+    assert_receive {:knotra, %{id: ^id, status: :completed}}, 2_000
+    assert F.Ledger.entries() == [["unexpected effect"]]
+  end
+
+  test "a failed dispatch-intent commit cannot invoke the effect" do
+    {id, definition, answer} = pending_answer("failed-intent")
+
+    Ecto.Adapters.SQL.query!(
+      Repo,
+      "CREATE TRIGGER fail_intent BEFORE UPDATE ON knotra_executions WHEN OLD.status = 'decided' AND NEW.status = 'running' BEGIN SELECT RAISE(FAIL, 'offline'); END",
+      [],
+      log: false
+    )
+
+    assert {:ok, _} = Knotra.answer(__MODULE__, id, definition, F.scope(), answer)
+    assert_receive {:knotra, %{id: ^id, status: :blocked}}, 2_000
+    assert F.Ledger.entries() == []
+  end
+
+  test "an effect whose result cannot be committed is reconciled, not retried" do
+    {id, definition, answer} = pending_answer("failed-result")
+
+    assert {:ok, _} =
+             Knotra.answer(
+               __MODULE__,
+               id,
+               definition,
+               Map.put(F.scope(), :effect_gate, self()),
+               answer
+             )
+
+    assert_receive {:effect_recorded, task}, 2_000
+
+    Ecto.Adapters.SQL.query!(
+      Repo,
+      "CREATE TRIGGER fail_result BEFORE UPDATE ON knotra_executions BEGIN SELECT RAISE(FAIL, 'offline'); END",
+      [],
+      log: false
+    )
+
+    gate_storage(:succeeded)
+    send(task, :continue)
+    assert_receive {:storage_returned, :succeeded, worker}, 2_000
+    Process.exit(worker, :kill)
+    Ecto.Adapters.SQL.query!(Repo, "DROP TRIGGER fail_result", [], log: false)
+    stop_supervised(__MODULE__)
+    start_instance()
+
+    assert {:ok, %{status: :blocked, error: :uncertain_effect}} =
+             Knotra.recover(__MODULE__, id, definition, F.scope())
+
+    assert F.Ledger.entries() == [["unexpected effect"]]
+  end
+
+  test "answering fails closed on an incompatible checkpoint format" do
+    {id, definition, answer} = pending_answer("future-format")
+    {:ok, checkpoint} = Knotra.checkpoint(__MODULE__, id, F.scope())
+    bytes = :erlang.term_to_binary(%{checkpoint | format: 2})
+
+    Ecto.Adapters.SQL.query!(
+      Repo,
+      "UPDATE knotra_executions SET checkpoint = ? WHERE id = ?",
+      [{:blob, bytes}, id],
+      log: false
+    )
+
+    assert {:error, :incompatible_checkpoint} =
+             Knotra.answer(__MODULE__, id, definition, F.scope(), answer)
+
+    assert F.Ledger.entries() == []
+  end
+
+  test "an authorized rejection ends the attempted operation without an effect" do
+    definition = F.definition(owner: self())
+    {:ok, id} = Knotra.submit(__MODULE__, definition, "Propose", F.scope(), "reject")
+    assert_receive {:knotra, %{id: ^id, status: :waiting, approval: approval}}, 2_000
+
+    answer = %{
+      request_id: approval.id,
+      version: approval.version,
+      name: approval.name,
+      arguments: approval.arguments,
+      decision: :reject
+    }
+
+    assert {:ok, %{status: :rejected, error: :approval_rejected}} =
+             Knotra.answer(__MODULE__, id, definition, F.scope(), answer)
+
+    assert {:ok, %{approval: %{disposition: :rejected, version: 2}}} =
+             Knotra.snapshot(__MODULE__, id, F.scope())
+
+    assert F.Ledger.entries() == []
   end
 
   test "pending approval survives runtime and storage reconnect without a new model call", %{
@@ -443,6 +857,36 @@ defmodule Knotra.DurableTest do
 
     assert code == 0, output
     assert output =~ "RECOVERED_WITHOUT_REPLAY"
+  end
+
+  defp gate_storage(phase) do
+    armed = start_supervised!({Agent, fn -> true end}, id: make_ref())
+    handler = make_ref()
+
+    :ok =
+      :telemetry.attach(
+        handler,
+        [:knotra, :durable_fixtures, :repo, :query],
+        &F.StorageGate.handle/4,
+        {self(), phase, armed}
+      )
+
+    on_exit(fn -> :telemetry.detach(handler) end)
+  end
+
+  defp pending_answer(key, opts \\ []) do
+    definition = F.definition(owner: self())
+    {:ok, id} = Knotra.submit(__MODULE__, definition, "Propose", F.scope(), key, opts)
+    assert_receive {:knotra, %{id: ^id, status: :waiting, approval: approval}}, 2_000
+
+    {id, definition,
+     %{
+       request_id: approval.id,
+       version: approval.version,
+       name: approval.name,
+       arguments: approval.arguments,
+       decision: :approve
+     }}
   end
 
   test "nonrecoverable model continuation is visibly blocked, not left running" do

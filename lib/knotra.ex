@@ -10,7 +10,8 @@ defmodule Knotra do
 
   `submit/6` is a separate opt-in Ecto path for durable acceptance and pending
   approvals. See `docs/durable-approvals.md`. Neither path provides cross-node
-  ownership, and the durable path cannot answer approvals or execute their tools.
+  ownership. `answer/5` can reject a request or approve one explicitly allowlisted
+  demonstration tool; this is not production consequential-operation support.
   """
   use Supervisor
 
@@ -81,9 +82,14 @@ defmodule Knotra do
     durable_call(:checkpoint, [instance, id, context])
   end
 
-  @doc "Recovers accepted work or inspects a compatible pending approval; never answers it."
+  @doc "Recovers accepted work or a committed tool-result continuation; never invents an answer or retries an uncertain effect."
   def recover(instance, id, definition, context) do
     durable_call(:recover, [instance, id, definition, context])
+  end
+
+  @doc "Answers one versioned approval; host context and the unchanged operation are required."
+  def answer(instance, id, definition, context, answer) do
+    durable_call(:answer, [instance, id, definition, context, answer])
   end
 
   defp durable_call(function, args) do

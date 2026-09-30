@@ -1,10 +1,10 @@
 # Durable submission and pending approvals
 
-Implemented scope: [issue #4](https://github.com/stlucasgarcia/knotra/issues/4), using the [SQLite-first Ecto decision](adr/0001-ecto-sqlite-persistence.md). This is an opt-in path alongside the existing non-durable `Knotra.start/5`, not production ownership/recovery certification.
+Implemented scope: [issue #4](https://github.com/stlucasgarcia/knotra/issues/4) and the constrained fake-operation demonstration in [issue #5](https://github.com/stlucasgarcia/knotra/issues/5), using the [SQLite-first Ecto decision](adr/0001-ecto-sqlite-persistence.md). This is an opt-in path alongside the existing non-durable `Knotra.start/5`, not production ownership/recovery certification.
 
-**Works:** commit-before-acknowledgment acceptance, tenant-scoped submission deduplication, a model-proposed operation, validated/authorized pending approval, stable inspection after restart, and private versioned checkpoints. Pending/terminal durable workers exit rather than retaining process handles.
+**Works:** commit-before-acknowledgment acceptance, tenant-scoped submission deduplication, a model-proposed operation, validated/authorized pending approval, approval/rejection by request identity and version, one explicitly allowlisted fake operation, restored model continuation, stable inspection after restart, and private versioned checkpoints. Pending/terminal durable workers exit rather than retaining process handles.
 
-**Does not work yet:** answering, approval edits, operation execution, cancellation by durable identity, active expiry processing, automatic background draining, autonomous retry of interrupted model work, PostgreSQL certification, or distributed ownership. There is intentionally no approval-answer function in this slice. An expiry timestamp is recorded, not an implemented expiry scheduler.
+**Does not work yet:** production consequential operations, approval edits, additional operations in the same execution, cancellation by durable identity, active expiry processing, automatic background draining, autonomous retry of interrupted model work or uncertain effects, PostgreSQL certification, or distributed ownership. Answer admission checks expiry, including at the SQLite conditional write; there is no expiry scheduler.
 
 ## Host setup
 
@@ -21,9 +21,9 @@ Configure the instance only after the host Repo is available:
  durable: [repo: MyApp.Repo, access: MyApp.AgentAccess]}
 ```
 
-`MyApp.AgentAccess` implements `Knotra.Access.authorize/3`. It receives the action (`:submit`, `:inspect`, `:checkpoint`, or `:recover`), execution ID (nil for submission), and a host-supplied context. Return `{:ok, tenant_id}` only after checking permission, deriving tenant identity from trusted host data; otherwise return an error. The context is never constructed from model arguments. Authorize `:checkpoint` separately: it exposes private continuation data, unlike public inspection.
+`MyApp.AgentAccess` implements `Knotra.Access.authorize/3`. It receives the action (`:submit`, `:inspect`, `:checkpoint`, `:recover`, or `:answer`), execution ID (nil for submission), and a host-supplied context. Return `{:ok, tenant_id}` only after checking permission, deriving tenant identity from trusted host data; otherwise return an error. The context is never constructed from model arguments. Authorize `:checkpoint` separately: it exposes private continuation data, unlike public inspection.
 
-Keep the existing tool contract: JSON schema is model metadata, while `validate/1` validates arguments and `authorize/2` enforces host business scope. In durable mode, `read_only: false` tools may describe a consequential proposal. **No tool's `call/2` runs on this path**, including read-only tools. The ordinary `start/5` path still rejects write-tool definitions.
+Keep the existing tool contract: JSON schema is model metadata, while `validate/1` validates arguments and `authorize/2` enforces host business scope. In durable mode, `read_only: false` tools may describe a consequential proposal. Submission alone never calls a tool. Answering can execute only a module explicitly listed in the instance's `durable: [demo_tools: [...]]` configuration (default `[]`), and only after an unchanged approval and fresh tool authorization. This allowlist is a trusted host opt-in for a fake demonstration, not a detector or sandbox for real side effects. Do not allowlist production operations. The ordinary `start/5` path still rejects write-tool definitions.
 
 ## Public interface
 
@@ -45,11 +45,11 @@ Matching tenant/key submissions reuse the original ID. Matching includes input, 
 
 A configured active-slot limit also covers durable workers. If a slot is unavailable, work remains `:accepted`; this slice has no background queue drainer. The host explicitly calls `recover/4` (or resubmits the same request) when capacity is available. There is not yet a separate pending-record quota or retention service; the host must bound submissions and storage. Later limit/admission work belongs to issue #7.
 
-Public records contain `:accepted`, `:running`, `:waiting`, `:failed` or `:blocked` status, ordered events, consumed counts and an optional approval. The approval includes stable identity, request version, originating call ID, operation name, validated arguments, `:pending` disposition and wall-clock expiry. Argument validation and host tool authorization run before the request is published. Expiry starts when the pending request is prepared. An observer receives public snapshots only after the corresponding database update; missing/failed delivery is not proof that a committed request was lost. Re-query the record. For terminal records, a separately supervised notifier waits for the execution supervisor to release the worker's slot before invoking the observer. Its observer call is bounded to one second; a slow or failed observer cannot retain active execution capacity.
+Public records contain `:accepted`, `:running`, `:waiting`, `:decided`, `:rejected`, `:completed`, `:failed` or `:blocked` status, ordered events, consumed counts and an optional approval. The approval includes stable identity, request version, originating call ID, operation name, validated arguments, `:pending` disposition and wall-clock expiry. Argument validation and host tool authorization run before the request is published. Expiry starts when the pending request is prepared. An observer receives public snapshots only after the corresponding database update; missing/failed delivery is not proof that a committed request was lost. Re-query the record. For terminal records, a separately supervised notifier waits for the execution supervisor to release the worker's slot before invoking the observer. Its observer call is bounded to one second; a slow or failed observer cannot retain active execution capacity.
 
 ## Safe points and recovery limits
 
-This slice supports the default loop and default tool runtime with exactly one model-proposed tool call. Unsupported compositions are rejected before acceptance; malformed model replies or invalid/unauthorized arguments fail without an approval or effect.
+This slice supports the default loop and default tool runtime with exactly one model-proposed tool call, followed by a tool result and a final model reply with no further tool calls. Unsupported compositions are rejected before acceptance; malformed model replies or invalid/unauthorized arguments fail without an approval or effect.
 
 A durable model explicitly opts in with optional `Knotra.Model.checkpoint_version/0`, returning a positive integer. The ReqLLM adapter provides version 1. Compatible replies must contain only bounded inert data: binaries/numbers, proper lists, tuples/maps, the fixed checkpoint atom vocabulary and supported Knotra/ReqLLM message/tool-call structs. Arbitrary metadata should use string keys/values. Atoms outside the literal vocabulary are rejected before publication—even if they exist in the writing VM—so fresh-VM safe decoding does not depend on that VM's atom history. Functions, PIDs, ports, references, unsupported structs and oversized records are rejected. There is no arbitrary plugin-state serializer.
 
@@ -57,7 +57,31 @@ The checkpoint contains a format version, accepted input, loop state, full model
 
 A fingerprint pins definition version, loop/model/tool-runtime identities, tool metadata and model checkpoint version. **The host must change the definition version whenever behavior, prompts or semantic model options change.** Private options are neither stored nor hashed; unchanged module names alone cannot detect changed code. Incompatible restoration is visibly blocked. Encoding an unsupported continuation blocks the execution while retaining its last valid checkpoint.
 
-Updates use a conditional revision, so stale workers cannot overwrite newer durable state. `recover/4` can start still-accepted work using freshly supplied definition/context, or return a compatible pending approval without invoking the model again. A model call interrupted while marked running, with no live worker in this instance, becomes `:blocked` / `:interrupted`; it is **not** silently retried. Pending approval continuation/answering is issue #5. This API is not a cross-instance/node takeover protocol: use one owning Knotra instance for a given execution until ownership support exists.
+Updates use a conditional revision, so stale workers cannot overwrite newer durable state. `recover/4` can start still-accepted work using freshly supplied definition/context, or return a compatible pending approval without invoking the model again. A model call interrupted while marked running, with no live worker in this instance, becomes `:blocked` / `:interrupted`; it is **not** silently retried. A committed tool result at the observation safe point can resume the default loop with its preserved exchanges, consumed counts and remaining active allowance. An interrupted final model call remains blocked instead of replayed. A recorded decision that did not start dispatch is also conservatively blocked on recovery; identical resubmission does not dispatch it. This API is not a cross-instance/node takeover protocol: use one owning Knotra instance for a given execution until ownership support exists.
+
+## Answering the demonstration approval
+
+Configure a fake tool explicitly: `durable: [repo: MyApp.Repo, access: MyApp.AgentAccess, demo_tools: [MyApp.FakeTool]]`. The host access policy must authorize `:answer` for the execution and derive the correct tenant from trusted responder identity. Use a fresh **map** context; neither that context nor credentials are restored from storage.
+
+```elixir
+{:ok, %{approval: request}} = Knotra.snapshot(MyApp.Agents, execution_id, host_context)
+
+answer = %{
+  request_id: request.id,
+  version: request.version,
+  name: request.name,
+  arguments: request.arguments,
+  decision: :approve # or :reject
+}
+
+{:ok, record} = Knotra.answer(MyApp.Agents, execution_id, definition, fresh_host_context, answer)
+```
+
+The answer map must contain exactly these five fields. Identity/version and the exact validated arguments must match; numeric coercion is not accepted. Expired, incompatible, unauthorized and wrong-tenant answers cannot dispatch. A rejection records terminal `:rejected` / `:approval_rejected` with no replacement proposal. The conditional decision increments the request version and retains the answered version for duplicate detection. Repeating the identical authorized answer is harmless; a conflicting answer fails. A successful return acknowledges a persisted disposition, **not** necessarily completion of its effect or final model call. Inspect the execution to see the current outcome.
+
+Approval records a stable `approval.operation.id` before starting a continuation worker. That worker conditionally records dispatch intent and consumed tool count before invoking the tool. It revalidates arguments, checks current host business authorization, and checks its persisted revision before `call/2`. Both authorization and invocation receive the stable ID as `context.knotra_operation_id`; model arguments cannot supply or replace it. The independent test ledger records that ID and survives execution restarts. The operation result is checkpointed before advancing the restored loop/model exchange.
+
+An effect error, retry request, timeout, lost result, or crash after dispatch admission is conservatively `:blocked` / `:uncertain_effect`, even if it might not have run. No retry is automatic and no exactly-once claim is made. If capacity is unavailable after recording the decision, the execution blocks with `:dispatch_not_started`; it is not silently queued for later effect execution. Duplicate answers cannot restart blocked work. Further cancellation/expiry lifecycle is #6, broader limit conformance is #7, and reconciliation/idempotent recovery is #8. This is not completion of the parent specification.
 
 ## Verification and SQLite test lifecycle
 

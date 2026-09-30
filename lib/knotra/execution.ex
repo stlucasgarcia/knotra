@@ -172,7 +172,10 @@ defmodule Knotra.Execution do
   end
 
   defp consume({:ok, {:ok, %Knotra.Reply{} = reply}}, %{stage: :model} = state) do
-    if valid_reply?(reply, state) and (is_nil(state.durable) or length(reply.calls) == 1) do
+    if valid_reply?(reply, state) and
+         (is_nil(state.durable) or
+            (state.counts.tools == 0 and length(reply.calls) == 1) or
+            (state.counts.tools == 1 and reply.calls == [])) do
       visible = Map.take(reply, [:text, :calls, :usage])
 
       state
@@ -193,18 +196,37 @@ defmodule Knotra.Execution do
         %{exchange | results: exchange.results ++ [%{call: call, output: output}]}
       end)
 
+    state =
+      if state.durable,
+        do:
+          put_in(state.approval.operation, %{
+            state.approval.operation
+            | status: :succeeded,
+              result: output
+          }),
+        else: state
+
     state
     |> Map.merge(%{exchanges: exchanges, last: {:tool, %{call: call, output: output}}})
     |> event(:tool_result, %{call: call, output: output})
     |> observe()
   end
 
+  defp consume({:ok, {:not_dispatched, reason}}, %{stage: {:tool, _}} = state) do
+    state = put_in(state.approval.operation.status, :not_dispatched)
+    finish(state, :failed, reason)
+  end
+
   defp consume({:ok, {:retry, reason}}, %{stage: stage} = state)
        when is_atom(reason) and (stage == :model or elem(stage, 0) == :tool) do
-    if state.counts.retries < state.limits.max_retries do
-      state |> count(:retries) |> event(:retry, %{reason: reason}) |> operation(stage)
+    if state.durable && match?({:tool, _}, stage) do
+      finish(state, :blocked, :uncertain_effect)
     else
-      finish(state, :failed, :retries_exhausted)
+      if state.counts.retries < state.limits.max_retries do
+        state |> count(:retries) |> event(:retry, %{reason: reason}) |> operation(stage)
+      else
+        finish(state, :failed, :retries_exhausted)
+      end
     end
   end
 
@@ -297,6 +319,12 @@ defmodule Knotra.Execution do
   end
 
   defp finish(state, status, value) do
+    {status, value} =
+      if status in [:failed, :cancelled] and
+           match?(%{operation: %{status: :dispatching}}, state[:approval]),
+         do: {:blocked, :uncertain_effect},
+         else: {status, value}
+
     Process.cancel_timer(state.timer)
 
     state = %{
@@ -486,7 +514,72 @@ defmodule Knotra.Execution do
         state
       end
 
-    launch(state, :setup, fn -> setup(state.definition, durable != nil) end)
+    if durable && durable[:resume] do
+      restore(state)
+    else
+      launch(state, :setup, fn -> setup(state.definition, durable != nil) end)
+    end
+  end
+
+  defp restore(state) do
+    {:ok, saved} = Knotra.Checkpoint.decode(state.durable.row.checkpoint)
+    {:ok, snapshot} = Knotra.Checkpoint.decode(state.durable.row.snapshot)
+    {:ok, tools} = tool_definitions(state.definition, true)
+    Process.cancel_timer(state.timer)
+    now = System.monotonic_time(:millisecond)
+
+    elapsed =
+      case List.last(snapshot.events) do
+        nil -> 0
+        event -> event.elapsed_ms
+      end
+
+    state =
+      state
+      |> Map.merge(Map.take(saved, [:loop_state, :exchanges, :last, :counts, :limits, :approval]))
+      |> Map.merge(%{
+        events: Enum.reverse(snapshot.events),
+        tool_definitions: tools,
+        started_at: now - elapsed,
+        deadline_at: now + saved.remaining_ms,
+        timer: Process.send_after(self(), :deadline, saved.remaining_ms)
+      })
+
+    if state.approval.operation.status == :succeeded,
+      do: advance(state),
+      else: dispatch_approved(state)
+  end
+
+  defp dispatch_approved(state) do
+    approval = state.approval
+    call = Enum.find(pending(state), &(&1.id == approval.call_id and &1.name == approval.name))
+
+    cond do
+      call == nil ->
+        finish(state, :blocked, :invalid_tool_request)
+
+      expired?(state) ->
+        finish(state, :failed, :deadline_exceeded)
+
+      state.counts.tools >= state.limits.max_tool_calls ->
+        finish(state, :failed, :tool_limit)
+
+      true ->
+        call = %{call | arguments: approval.arguments}
+        state = put_in(state.approval.operation.status, :dispatching)
+        state = state |> count(:tools) |> event(:tool_started, %{call: call})
+        # Persist dispatch intent before entering the host boundary. The task uses
+        # the resulting revision, never the pre-intent row.
+        case Knotra.Durable.persist(%{state | stage: {:tool, call}}) do
+          {:ok, recorded} ->
+            launch_task(recorded, {:tool, call}, fn ->
+              Knotra.Durable.dispatch(recorded, call)
+            end)
+
+          {:error, reason} ->
+            block_durable(state, reason)
+        end
+    end
   end
 
   defp setup definition, durable do
