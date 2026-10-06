@@ -1,11 +1,16 @@
 # Knotra
 
-An embedded, plugin-driven Elixir agent harness for background work.
+An embedded, plugin-driven Elixir agent harness for background work and an opt-in approval demonstration.
 
-**Milestone 1 is an in-memory prototype, not a durable or production-ready runtime.**
-ReqLLM is the only direct third-party dependency. No Phoenix or database is required.
+**Neither path is production-ready.** `start/5` is the milestone-1 in-memory,
+read-only path. [Durable approvals](docs/durable-approvals.md) adds a bounded
+SQLite/fake-operation slice through optional Ecto/Ecto SQL and a host-owned Repo.
+See [ADR 0001](docs/adr/0001-ecto-sqlite-persistence.md) for the approved persistence
+dependency exception; other dependencies still require authorization.
 
-## Embed in your application
+This guide shows the non-durable path. It requires neither Phoenix nor a database.
+
+## Embed the non-durable path in your application
 
 ```elixir
 # In your application's supervision tree:
@@ -116,11 +121,13 @@ input, prior exchanges, and tool definitions; it returns a `Knotra.Reply`. Its
 opaque continuation preserves provider messages without exposing them in public
 records. Tests include an alternate loop that completes without a model call.
 
-Persistence/admission/recovery plugins are **not implemented yet**. The test-only
-`MemoryRecorder` demonstrates replacing the observer with an in-memory snapshot
-store; it is not a durable persistence adapter.
+The [opt-in durable path](docs/durable-approvals.md) implements Ecto persistence,
+submission admission and compatible safe-point recovery with the default loop
+and tool runtime. General recovery of arbitrary plugin state and distributed
+ownership remain unsupported. The test-only `MemoryRecorder` demonstrates an
+in-memory observer store; it is not a durable persistence adapter.
 
-## Limits, cancellation, and records
+## Non-durable limits, cancellation, and records
 
 - Supervised tasks run plugin callbacks; coordinators remain responsive.
 - Turn/tool counters count attempts, including retries. `max_retries` is shared
@@ -145,8 +152,9 @@ store; it is not a durable persistence adapter.
   handles and observer recipients, redaction, and record lifetime. Releasing a
   handle drops Knotra's copy, not copies already delivered to observers.
 
-No deduplication, deployment continuity, cross-node ownership, exactly-once effects,
-financial writes, hard monetary cap, answer cache, or durable audit guarantee.
+The non-durable path provides no deduplication or restart recovery. Neither path
+provides distributed ownership, production financial writes, exactly-once effects,
+a hard monetary cap, an answer cache, or a production durable-audit guarantee.
 Provider-option semantics remain ReqLLM/provider-specific; full provider parity
 has not been verified. Unsupported or incomplete local tool calls fail closed.
 
@@ -165,7 +173,11 @@ requests, limits, retries, cancellation, process death, and record isolation.
 The ReqLLM adapter is also exercised through offline HTTP fixtures for OpenAI,
 Anthropic, and Gemini, including refusal/incomplete responses, absent usage, and
 text-only multi-turn continuations. Timer-ordering and credential-redaction
-regressions run without provider access.
+regressions run without provider access. The [durable suite](test/durable_test.exs)
+also covers committed SQLite restart/race scenarios, tenant-scoped submission,
+operation-bound fake approvals, cancellation/expiry, preserved allowances and
+compatible restoration; see its [test lifecycle](docs/durable-approvals.md#verification-and-sqlite-test-lifecycle).
+These tests do not certify production effects or distributed ownership.
 
 For fresh-model evaluation, submit sanitized inputs with a real model plugin and
 a fixture-only tool runtime, then assess facts, permitted tool use, output shape,
@@ -173,5 +185,9 @@ and budgets. Never reuse production tool implementations or credentials for
 isolated scenario evaluation. A general evaluation runner and replay product are
 not included; see the executable scenario in `test/knotra_test.exs`.
 
-See [the agreed design](docs/design.md) and
-[the alternatives research](docs/research/elixir-agent-alternatives.md).
+See [the architecture and future workflow scenarios](ARCHITECTURE.md),
+[the milestone-1 design](docs/design.md), and
+[the historical alternatives research](docs/research/elixir-agent-alternatives.md).
+The opt-in approval subset is implemented as documented above. Clarification,
+takeover, structured UI, voice, delegation and generated-code branches remain
+design work, not implemented capabilities.

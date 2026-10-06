@@ -1,12 +1,12 @@
 # Knotra: agreed design and first milestone
 
-Status: milestone 1 implemented as a non-durable prototype; production guarantees remain deferred. Comparative evidence: [Elixir alternatives](research/elixir-agent-alternatives.md). Domain vocabulary: [CONTEXT.md](../CONTEXT.md).
+Status: historical milestone-1 scope, implemented as a non-durable prototype; production guarantees remain deferred. This document preserves that milestone's design and evidence, not the complete current runtime. [ARCHITECTURE.md](../ARCHITECTURE.md) distinguishes the implemented [opt-in approval slice](durable-approvals.md) from future interactive, voice, delegation and generated-code branches. [ADR 0001](adr/0001-ecto-sqlite-persistence.md) supersedes the original ReqLLM-only restriction specifically for the approved Ecto/SQLite persistence integration; other dependencies still require authorization. Historical comparative evidence: [Elixir alternatives](research/elixir-agent-alternatives.md). Domain vocabulary: [CONTEXT.md](../CONTEXT.md).
 
 ## Purpose
 
 An embedded Elixir library for background agent executions, eventually supporting an agent factory. The first use case accepts an email, performs an authorized read-only receipt lookup, and produces a proposed reply. The host owns triggers and business authorization. Each execution has isolated state; agent definitions are reusable.
 
-## Dependency constraint
+## Milestone-1 dependency constraint
 
 ReqLLM is the only permitted direct third-party dependency for now. Its transitive dependencies are unavoidable. Elixir/OTP standard libraries are available. Do not add other harnesses, Ecto, Postgrex, Telemetry, Phoenix, or alternative storage packages. Borrow architectural ideas, not framework dependencies.
 
@@ -72,7 +72,7 @@ Skills, memory, routing, agent creation, generated-code sandboxes, financial wri
 
 Knotra does not differentiate merely through embedding, OTP, plugins, or replaceable loops; competitors already provide these. Its intended distinction is the combined production execution contract. That must be demonstrated by tests and operational evidence before being claimed.
 
-## Implementation evidence and remaining boundary
+## Milestone-1 implementation evidence and remaining boundary
 
 Milestone 1 provides replaceable loop/model/tool-runtime/observer behaviours, supervised execution, bounded attempts, cancellation, and public in-memory records. A test-only observer stores snapshots in an Agent; there is no production persistence implementation or recovery interface yet. Completed handles consume instance capacity until explicitly released.
 
