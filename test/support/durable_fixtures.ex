@@ -54,6 +54,44 @@ defmodule Knotra.DurableFixtures.Ledger do
       [],
       log: false
     )
+
+    Ecto.Adapters.SQL.query!(
+      __MODULE__,
+      "CREATE TABLE IF NOT EXISTS idempotent_results (operation_id TEXT PRIMARY KEY, arguments TEXT NOT NULL, result TEXT NOT NULL)",
+      [],
+      log: false
+    )
+  end
+
+  # This fake external service atomically binds identity, arguments and result
+  # inside its own ledger, never inside Knotra's checkpoint transaction.
+  def record_once(operation_id, args) do
+    arguments = JSON.encode!(args)
+
+    transact(fn ->
+      %{num_rows: inserted} =
+        Ecto.Adapters.SQL.query!(
+          __MODULE__,
+          "INSERT INTO idempotent_results VALUES (?, ?, ?) ON CONFLICT(operation_id) DO NOTHING",
+          [operation_id, arguments, "fake effect"],
+          log: false
+        )
+
+      %{rows: [[bound_arguments, result]]} =
+        Ecto.Adapters.SQL.query!(
+          __MODULE__,
+          "SELECT arguments, result FROM idempotent_results WHERE operation_id = ?",
+          [operation_id],
+          log: false
+        )
+
+      if bound_arguments == arguments do
+        if inserted == 1, do: record(operation_id)
+        {:ok, result}
+      else
+        {:error, :approval_mismatch}
+      end
+    end)
   end
 
   def record(operation_id) do
@@ -144,8 +182,10 @@ defmodule Knotra.DurableFixtures.Tool do
   def authorize(_, _), do: {:error, :forbidden}
 
   def call(_, context) do
-    result = Knotra.DurableFixtures.Ledger.record(context.knotra_operation_id)
+    effect_reply(Knotra.DurableFixtures.Ledger.record(context.knotra_operation_id), context)
+  end
 
+  def effect_reply(result, context) do
     if owner = context[:effect_gate] do
       send(owner, {:effect_recorded, self()})
 
@@ -156,6 +196,30 @@ defmodule Knotra.DurableFixtures.Tool do
 
     Map.get(context, :effect_reply, result)
   end
+end
+
+defmodule Knotra.DurableFixtures.IdempotentTool do
+  @behaviour Knotra.Tool
+  def definition,
+    do: Map.put(Knotra.DurableFixtures.Tool.definition(), :idempotency, :operation_id)
+
+  defdelegate validate(args), to: Knotra.DurableFixtures.Tool
+  defdelegate authorize(args, context), to: Knotra.DurableFixtures.Tool
+
+  def call(args, context) do
+    result = Knotra.DurableFixtures.Ledger.record_once(context.knotra_operation_id, args)
+    Knotra.DurableFixtures.Tool.effect_reply(result, context)
+  end
+end
+
+defmodule Knotra.DurableFixtures.WeakIdempotentTool do
+  @behaviour Knotra.Tool
+  def definition,
+    do: Map.put(Knotra.DurableFixtures.Tool.definition(), :idempotency, :best_effort)
+
+  defdelegate validate(args), to: Knotra.DurableFixtures.Tool
+  defdelegate authorize(args, context), to: Knotra.DurableFixtures.Tool
+  defdelegate call(args, context), to: Knotra.DurableFixtures.Tool
 end
 
 defmodule Knotra.DurableFixtures.Model do

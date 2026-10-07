@@ -52,7 +52,7 @@ Implementation anchors:
 | Models | [ReqLLM adapter](lib/knotra/models/req_llm.ex) | Text and local tool calls, including compatible durable continuation; no audio or generated-UI contract. |
 | Inspection | Public snapshots and observer; [durable contract](docs/durable-approvals.md) | Non-durable records are in-memory; durable records are queryable after restart. Neither snapshots nor best-effort observer delivery replace private recovery checkpoints. All may contain sensitive content. |
 
-Supported contracts constrain trusted plugins; arbitrary in-VM Elixir can bypass those contracts. Declaring a tool read-only or allowlisting a fake tool is not a sandbox. Durable compatibility is pinned to the definition/composition and checkpoint format; incompatible work blocks visibly. Interrupted model calls and uncertain effects are not blindly retried. Killing a task cannot roll back a remote effect or reliably stop independently spawned work.
+Supported contracts constrain trusted plugins; arbitrary in-VM Elixir can bypass those contracts. Declaring a tool read-only or allowlisting a fake tool is not a sandbox. Durable compatibility is pinned to the definition/composition and checkpoint format; incompatible work blocks visibly. Interrupted model calls are not replayed. Uncertain effects retry only through explicit recovery with a pinned reliable operation-ID contract, current authorization and remaining budgets; otherwise they remain blocked. Killing a task cannot roll back a remote effect or reliably stop independently spawned work.
 
 ## 2. Ownership and composition — agreed direction
 
@@ -105,7 +105,7 @@ Before implementing concurrent children, budget reservations and parent/child re
 
 ## 4. Durable interaction lifecycle — implemented approval subset, planned expansion
 
-The [opt-in approval contract](docs/durable-approvals.md) implements durable acceptance, waits, answers, pre-admission cancellation, expiry on access, preserved allowances and compatible safe-point restoration. It does not implement clarification, takeover, general interrupted-work replay or distributed ownership.
+The [opt-in approval contract](docs/durable-approvals.md) implements durable acceptance, waits, answers, pre-admission cancellation, expiry on access, preserved allowances and compatible safe-point restoration. It also supports [explicit idempotent fake-effect recovery](docs/durable-approvals.md#explicit-recovery-of-uncertain-fake-effects), not general interrupted-work replay. Clarification, takeover and distributed ownership remain unimplemented.
 
 The expanded lifecycle below is conceptual, not a list of current Elixir status atoms:
 
@@ -225,7 +225,7 @@ These observations came from primary documentation/source inspection, not instal
 | E5 | Replace loop/model/tools/observer; evaluate with fake model and fake tool effects; redact private failure state. | Existing: substitution, isolated-evaluation and credential-canary tests in [harness tests](test/knotra_test.exs). Not malicious-plugin containment. |
 | E6 | Offline provider fixtures return incomplete calls, missing usage, or text-only continuation → fail closed where unsupported; unknown usage stays unknown. | Existing: [ReqLLM tests](test/req_llm_test.exs). Not live-model or audio evaluation. |
 | E7 | Commit acceptance and pending approval → release worker → restart runtime/Repo or inspect from a fresh BEAM → recover the same identity/request without repeating model work. | Existing: [durable tests](test/durable_test.exs) and [SQLite test lifecycle](docs/durable-approvals.md#verification-and-sqlite-test-lifecycle), including failed commits and tenant-scoped deduplication. |
-| E8 | Duplicate/conflicting answers, stale bindings, revoked authority and answer/cancel/expiry races → durable ordering fences dispatch; uncertain fake effects remain visible without blind retry. | Existing: [durable tests](test/durable_test.exs), using an independent fake-effect ledger. Not reliable idempotent effect recovery or real writes. |
+| E8 | Duplicate/conflicting answers, stale bindings, revoked authority and answer/cancel/expiry races → durable ordering fences dispatch; uncertain fake effects remain visible without blind retry. | Existing: [durable tests](test/durable_test.exs), using an independent fake-effect ledger. Explicit stable-ID recovery is tested against a reliably idempotent fake ledger; no real-write certification. |
 | E9 | Sequential approvals, restart and capacity refusal → consumed allowances persist, compatible safe points resume, incompatible work blocks and configured admission limits hold. | Existing: [durable tests](test/durable_test.exs). Not distributed ownership, automatic queue draining or PostgreSQL parity. |
 
 ### Expansion acceptance traces
@@ -242,7 +242,7 @@ These observations came from primary documentation/source inspection, not instal
 | F8 | Voice-only user requests operation → hear action readback → explicit current confirmation → identical approval/authorization boundary as UI, with no screen required. | Future. |
 | F9 | Wrong recipient/amount transcription, ambient speech, stale “yes,” or interrupted readback → no approval; clarify and reconfirm corrected proposal. | Future; speech quality thresholds unresolved. |
 | F10 | Live user interrupts playback during an operation → distinguish stopping speech from stopping execution; never claim an in-flight write rolled back. | Unresolved live-audio protocol; invariant agreed. |
-| F11 | Remote effect commits, execution dies before recording result → reuse reliable idempotency identity or block for reconciliation; never blind retry. | Partial: uncertain fake effects block without automatic retry. Reliable idempotent recovery remains [issue #8](https://github.com/stlucasgarcia/knotra/issues/8); real service contracts require separate proof. |
+| F11 | Remote effect commits, execution dies before recording result → reuse reliable idempotency identity or block for reconciliation; never blind retry. | Partial: the fake-service fork proves explicit stable-ID idempotent recovery or blocked reconciliation, without automatic retries. Real service contracts require separate proof. |
 | F12 | Generated program attempts forbidden access, malformed output or excessive computation → deny/terminate within the chosen resource/isolation contract without leaking credentials. | Future; executor-specific attack corpus unresolved. |
 | F13 | Generated program proposes many operations, or future bridge loops over host calls → each dispatched call consumes shared budget and policy checks; partial effects remain recorded. | Future. |
 | F14 | External sandbox backend is absent/insufficient, or evaluator dies while child processes/remote calls run → fail closed; report actual surviving work rather than claiming containment. | Unresolved until backend selection. |
@@ -261,7 +261,7 @@ Current baseline command: `mix test --warnings-as-errors`. It runs both the non-
 ## 9. Implementation order and deliberate open choices
 
 1. Preserve the non-durable path and the implemented opt-in approval slice with their regression tests.
-2. Complete the remaining uncertain-effect recovery and full real-storage workflow validation in [issues #8](https://github.com/stlucasgarcia/knotra/issues/8) and [#9](https://github.com/stlucasgarcia/knotra/issues/9). The Ecto/SQLite integration is already authorized by ADR 0001; further dependencies still require approval.
+2. Complete the integrated real-storage acceptance matrix in [issue #9](https://github.com/stlucasgarcia/knotra/issues/9), preserving the implemented [narrow idempotent-recovery contract](docs/durable-approvals.md#explicit-recovery-of-uncertain-fake-effects). The Ecto/SQLite integration is already authorized by ADR 0001; further dependencies still require approval.
 3. Only after that proof, select a scoped clarification/takeover or presentation slice; structured UI and recorded voice must preserve the same approval/authorization boundaries.
 4. Add bounded delegation or restricted generated computation only with its shared-budget and failure tests.
 5. Select live-audio and general-purpose isolation backends separately; do not pull their complexity into the first interactive slice.

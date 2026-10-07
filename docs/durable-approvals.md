@@ -1,8 +1,8 @@
 # Durable submission and pending approvals
 
-Implemented scope: [issue #4](https://github.com/stlucasgarcia/knotra/issues/4), the constrained fake-operation demonstration in [issue #5](https://github.com/stlucasgarcia/knotra/issues/5), waiting cancellation/expiry in [issue #6](https://github.com/stlucasgarcia/knotra/issues/6), and allowances/capacity/compatible restoration in [issue #7](https://github.com/stlucasgarcia/knotra/issues/7), using the [SQLite-first Ecto decision](adr/0001-ecto-sqlite-persistence.md). This is an opt-in path alongside the existing non-durable `Knotra.start/5`, not production ownership/recovery certification.
+Implemented scope: [issue #4](https://github.com/stlucasgarcia/knotra/issues/4), the constrained fake-operation demonstration in [issue #5](https://github.com/stlucasgarcia/knotra/issues/5), waiting cancellation/expiry in [issue #6](https://github.com/stlucasgarcia/knotra/issues/6), allowances/capacity/compatible restoration in [issue #7](https://github.com/stlucasgarcia/knotra/issues/7), and explicitly budgeted idempotent fake-effect recovery in [issue #8](https://github.com/stlucasgarcia/knotra/issues/8), using the [SQLite-first Ecto decision](adr/0001-ecto-sqlite-persistence.md). This is an opt-in path alongside the existing non-durable `Knotra.start/5`, not production ownership/recovery certification.
 
-**Works:** commit-before-acknowledgment acceptance, tenant-scoped submission deduplication, a model-proposed operation, validated/authorized pending approval, approval/rejection by request identity and version, sequential explicitly allowlisted fake operations, preserved budgets and model continuation, bounded outstanding work, recoverable capacity-waiting decisions, stable inspection after restart, durable pre-admission cancellation, persisted response expiry on access, and private versioned checkpoints. Pending/terminal durable workers exit rather than retaining process handles.
+**Works:** commit-before-acknowledgment acceptance, tenant-scoped submission deduplication, a model-proposed operation, validated/authorized pending approval, approval/rejection by request identity and version, sequential explicitly allowlisted fake operations, preserved budgets and model continuation, bounded outstanding work, recoverable capacity-waiting decisions, stable inspection after restart, durable pre-admission cancellation, persisted response expiry on access, private versioned checkpoints, and explicit stable-ID recovery of reliably idempotent fake effects. Pending/terminal durable workers exit rather than retaining process handles.
 
 **Does not work yet:** production consequential operations, approval edits, parallel/batched operations, cancellation of arbitrary active work by durable identity, background expiry sweeping, automatic background draining, autonomous retry of interrupted model work or uncertain effects, PostgreSQL certification, or distributed ownership. Answer admission checks expiry, including at the SQLite conditional write; there is no expiry scheduler.
 
@@ -89,7 +89,51 @@ The answer map must contain exactly these five fields. Identity/version and the 
 
 Approval records a stable `approval.operation.id` before starting a continuation worker. That worker conditionally records dispatch intent and consumed tool count before invoking the tool. It revalidates arguments, checks current host business authorization, and checks its persisted revision before `call/2`. Both authorization and invocation receive the stable ID as `context.knotra_operation_id`; model arguments cannot supply or replace it. The independent test ledger records that ID and survives execution restarts. The operation result is checkpointed before advancing the restored loop/model exchange.
 
-An effect error, retry request, timeout, lost result, or crash after dispatch admission is conservatively `:blocked` / `:uncertain_effect`, even if it might not have run. No retry is automatic and no exactly-once claim is made. If capacity is unavailable after recording the decision, `:ready` preserves it for explicit recovery or exact-answer redelivery with fresh context. Other continuation-start failures block with `:dispatch_not_started`; duplicate answers cannot restart blocked work. Reconciliation/idempotent recovery remains #8. This is not completion of the parent specification.
+An effect error, retry request, timeout, lost result, or crash after dispatch admission is conservatively `:blocked` / `:uncertain_effect`, even if it might not have run. No retry is automatic and no exactly-once claim is made. If capacity is unavailable after recording the decision, `:ready` preserves it for explicit recovery or exact-answer redelivery with fresh context. Other continuation-start failures block with `:dispatch_not_started`; duplicate answers cannot restart blocked work. Explicit recovery is limited to the idempotency contract below; non-idempotent outcomes still require host investigation. Full integrated acceptance validation remains #9. This is not completion of the parent specification.
+
+## Explicit recovery of uncertain fake effects
+
+A trusted fake tool's `definition/0` may include `idempotency: :operation_id` only
+when its external service durably binds `context.knotra_operation_id` to the exact
+approved arguments and original result. Concurrent or restarted duplicate calls
+must not create another effect and must be able to return that result. The binding
+must survive the entire supported recovery lifetime; best-effort deduplication,
+an expiring cache, or a caller-supplied key alone is insufficient. Different
+arguments for an existing identity must be rejected. The repository's fake service
+implements this with an atomic transaction in its independent ledger, not in the
+execution checkpoint database. This declaration is a host promise, not proof that
+an arbitrary remote service implements it.
+
+Call `recover/4` explicitly with fresh host context to request recovery. Ordinary
+answer redelivery, observers and `{:retry, reason}` tool replies do not initiate
+retries. Only a compatible approved operation with an uncertain admitted outcome,
+no live local worker, the pinned `:operation_id` declaration, and current fake-tool
+allowlisting is eligible. Adding the declaration to an already accepted definition
+changes its composition and cannot retroactively authorize a retry.
+
+Each conditionally admitted recovery attempt consumes one tool attempt and one
+shared retry allowance, including attempts whose subsequent business authorization
+is refused. Model retries use that same allowance. A retry does not invent a loop
+step or reset model, tool, retry, step or active-time limits. Remaining active time
+is restored conservatively, including running-checkpoint downtime. Expired active
+allowance or exhausted counters prevent another attempt. Fresh business authority,
+revision/lifecycle and the active deadline are checked before invoking the tool.
+Failed intent commits cannot invoke it. Capacity refusal retains `:blocked` /
+`:uncertain_effect`, not `:ready`, and consumes no attempt allowance; explicit
+recovery must be requested again when capacity is free.
+
+Permission to retry is not knowledge that the original effect occurred. If a new
+attempt is refused, the original operation remains `:dispatching` with an unknown
+result; a `:retry_refused` event records the nonsecret refusal reason and stable
+operation identity. It is not relabelled `:not_dispatched`. Missing or weaker
+idempotency guarantees leave the operation blocked for host investigation. A
+recorded successful result resumes only at a supported safe point without another
+tool call; repeated recovery of terminal history returns that history unchanged.
+Conditional revisions fence obsolete workers and competing local recoveries.
+
+These guarantees apply only to the allowlisted fake demonstration and one owning
+Knotra instance per execution. They do not provide distributed takeover, remote
+rollback, automated reconciliation of real services or general exactly-once effects.
 
 ## Cancellation and response expiry
 
@@ -105,7 +149,7 @@ Dispatch admission means the committed intent, not the later wall-clock instant 
 
 `response_timeout` sets a wall-clock human-response deadline, separate from the saved active-work allowance. While the request is still pending, authorized `snapshot/3`, `recover/4`, `answer/5`, or `cancel/3` discovers overdue requests and conditionally commits `:expired` / `:approval_expired`. Answer admission and expiry use complementary SQLite time predicates plus the same revision fence. An on-time committed answer consumes the human-response deadline; that deadline does not later expire an approved operation. There is no per-request timer or background sweeper, so an untouched overdue row is materialized as expired on its next lifecycle access—even following a fresh BEAM restart. Private `checkpoint/3` remains a read of the saved checkpoint, not an expiry trigger.
 
-Expiry preserves consumed counts and remaining active allowance, ends this attempt, and never reproposes or implicitly approves. Late answers return `:approval_expired`. Storage failure returns an error rather than claiming an uncommitted cancellation or expiry. Direct lifecycle transitions are inspectable without replaying observers; a delayed old notification is not authoritative over the current durable record. Reconciliation of uncertain admitted effects remains deferred to #8.
+Expiry preserves consumed counts and remaining active allowance, ends this attempt, and never reproposes or implicitly approves. Late answers return `:approval_expired`. Storage failure returns an error rather than claiming an uncommitted cancellation or expiry. Direct lifecycle transitions are inspectable without replaying observers; a delayed old notification is not authoritative over the current durable record. An uncertain admitted effect can use only the explicit idempotent fake-recovery contract above; other outcomes remain blocked for host investigation.
 
 ## Verification and SQLite test lifecycle
 
@@ -115,4 +159,6 @@ The test host uses committed, file-backed databases in private directories under
 
 An independent ledger database observes fake effects and survives execution/runtime restarts. Tests stop runtime and Repo, reconnect to the same execution file, and separately inspect it from a fresh BEAM. Database triggers inject acceptance and pending-commit failures. A test-only Ecto Repo query gate pauses the submitting caller after the acceptance commit but before acknowledgment; killing it proves safe resubmission against the original ID without duplicate model work. Other scenarios cover lost-notification recovery, duplicate/conflicting submissions, tenant/permission checks, incompatible versions, unsupported continuations and runtime-created atoms, gated-observer capacity release, an offline ReqLLM provider continuation and interrupted model calls. Lifecycle tests additionally race approve/reject/cancel/expire through independent connections, synchronize around decision and dispatch writes, and verify eventual or uncertain effects remain observable when cancellation is too late. They control stored response deadlines to represent elapsed offline time without sleeps or private process-state assertions; the existing write-time expiry regression also checks the real SQLite clock. Fresh-BEAM checks verify cancellation preservation and lazy expiry persistence. Allowance tests observe model attempts and the independent effect ledger across repeated waits/restarts, exercise shared retry/attempt/step limits, and control saved deadlines/remainders to prove that restored workers cannot replenish time. Concurrent bounded submissions, restart admission, blocked-work quota retention and ready-decision recovery/cancellation cover capacity. Checkpoint canaries cover credentials/private options/authority and revocation after restart. Tests assert through public Knotra calls; direct SQL is confined to fixture configuration, controlled deadline/allowance/corruption setup and storage-failure injection. After all connections stop, each fixture deletes only its own directory and sidecars. A rollback-only SQL Sandbox is not used as restart evidence.
 
-These checks prove the bounded SQLite slice, not power-loss durability, PostgreSQL parity, safe general effect retries, distributed leases or exactly-once execution. The existing architecture's DeepSeek-first comparison still applies: an inbox or snapshot is not a durable pending approval; LangGraph-style node replay can repeat effects. This slice deliberately stops instead of replaying an uncertain model step. No alternate harness dependency was adopted.
+Idempotent-recovery scenarios additionally crash before the fake effect, after its ledger commit and after result persistence, reconnect the same execution storage, and verify the unchanged operation identity and one ledger effect. A fresh BEAM repeats an uncertain request against the same independent ledger. Concurrent recoveries, weak/absent declarations, removed allowlisting, revoked authority, exhausted/shared allowances, lifecycle rejection, capacity refusal, failed retry-intent commits and stale retry outcomes are exercised through the public interface. Refused attempts preserve uncertainty about the original effect.
+
+These checks prove the bounded SQLite slice and this fake service's explicit idempotency contract, not power-loss durability, PostgreSQL parity, safe general effect retries, distributed leases or exactly-once execution. The existing architecture's DeepSeek-first comparison still applies: an inbox or snapshot is not a durable pending approval; LangGraph-style node replay can repeat effects. This slice deliberately stops instead of replaying an uncertain model step. No alternate harness dependency was adopted.

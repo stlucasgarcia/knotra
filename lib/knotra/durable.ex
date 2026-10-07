@@ -274,17 +274,31 @@ defmodule Knotra.Durable do
   defp demonstration(_config, _definition, _approval, :reject), do: :ok
 
   defp demonstration(config, definition, approval, :approve) do
-    module = Enum.find(definition.tools, &(&1.definition().name == approval.name))
-    if module != nil and module in config.demo_tools, do: :ok, else: {:error, :demonstration_only}
+    if demonstration_tool(config, definition, approval.name) do
+      :ok
+    else
+      {:error, :demonstration_only}
+    end
   end
 
-  defp admit_continuation(instance, config, row, definition, context) do
-    case start_continuation(instance, config, row, definition, context) do
+  defp demonstration_tool(config, definition, name) do
+    module = Enum.find(definition.tools, &(&1.definition().name == name))
+
+    if module != nil and module in config.demo_tools do
+      module
+    end
+  end
+
+  defp admit_continuation(instance, config, row, definition, context, retry \\ false) do
+    case start_continuation(instance, config, row, definition, context, retry) do
       {:ok, _} ->
         read_snapshot(config, row.tenant, row.id)
 
       {:error, :already_running} ->
         read_snapshot(config, row.tenant, row.id)
+
+      {:error, :max_children} when retry ->
+        block(config, row, :uncertain_effect)
 
       {:error, :max_children} ->
         if row.status == "ready" do
@@ -301,11 +315,11 @@ defmodule Knotra.Durable do
         end
 
       _ ->
-        block(config, row, :dispatch_not_started)
+        block(config, row, if(retry, do: :uncertain_effect, else: :dispatch_not_started))
     end
   end
 
-  defp start_continuation(instance, config, row, definition, context) do
+  defp start_continuation(instance, config, row, definition, context, retry \\ false) do
     {:ok, saved} = Checkpoint.decode(row.checkpoint)
 
     with :ok <- supported(definition, saved.input, Map.to_list(saved.limits)) do
@@ -314,6 +328,7 @@ defmodule Knotra.Durable do
         repo: config.repo,
         row: row,
         resume: true,
+        retry: retry,
         response_timeout: saved.response_timeout,
         demo_tools: config.demo_tools
       }
@@ -351,13 +366,38 @@ defmodule Knotra.Durable do
       with {:ok, config, tenant} <- access(instance, :recover, id, context),
            {:ok, row} <- Persistence.fetch(config.repo, tenant, id),
            {:ok, row} <- refresh_expiry(config, row),
+           {:ok, snapshot} <- Checkpoint.decode(row.snapshot),
            {compatibility, checkpoint} <- compatible_checkpoint(row, definition) do
         cond do
-          row.status in ["cancelled", "expired", "completed", "failed", "rejected", "blocked"] ->
-            Checkpoint.decode(row.snapshot)
+          row.status in ["cancelled", "expired", "completed", "failed", "rejected"] or
+              (row.status == "blocked" and snapshot.error != :uncertain_effect) ->
+            {:ok, snapshot}
 
           compatibility == :error ->
             block(config, row, :incompatible_checkpoint)
+
+          row.status in ["running", "blocked"] and
+            match?(
+              %{
+                approval: %{
+                  disposition: :approved,
+                  operation: %{status: :dispatching, admitted: true, result: nil}
+                }
+              },
+              checkpoint
+            ) and
+              Registry.lookup(instance, {:durable, id}) == [] ->
+            if is_map(context) and snapshot.approval === checkpoint.approval and
+                 retryable?(config, definition, checkpoint) do
+              admit_continuation(instance, config, row, definition, context, true)
+            else
+              if row.status == "blocked",
+                do: {:ok, snapshot},
+                else: block(config, row, :uncertain_effect)
+            end
+
+          row.status == "blocked" ->
+            {:ok, snapshot}
 
           row.status == "ready" ->
             admit_continuation(instance, config, row, definition, context)
@@ -369,19 +409,14 @@ defmodule Knotra.Durable do
             end
 
           row.status in ["running", "decided"] and Registry.lookup(instance, {:durable, id}) == [] ->
-            cond do
-              match?(%{approval: %{operation: %{status: :dispatching}}}, checkpoint) ->
-                block(config, row, :uncertain_effect)
-
-              match?(
-                %{approval: %{operation: %{status: :succeeded}}, stage: :observation},
-                checkpoint
-              ) ->
-                start_continuation(instance, config, row, definition, context)
-                read_snapshot(config, tenant, id)
-
-              true ->
-                block(config, row, :interrupted)
+            if match?(
+                 %{approval: %{operation: %{status: :succeeded}}, stage: :observation},
+                 checkpoint
+               ) do
+              start_continuation(instance, config, row, definition, context)
+              read_snapshot(config, tenant, id)
+            else
+              block(config, row, :interrupted)
             end
 
           true ->
@@ -389,6 +424,16 @@ defmodule Knotra.Durable do
         end
       end
     end)
+  end
+
+  defp retryable?(config, definition, checkpoint) do
+    module = demonstration_tool(config, definition, checkpoint.approval.name)
+
+    module != nil and module.definition()[:idempotency] === :operation_id and
+      checkpoint.counts.tools > 0 and checkpoint.counts.tools < checkpoint.limits.max_tool_calls and
+      checkpoint.counts.retries < checkpoint.limits.max_retries and checkpoint.remaining_ms > 0 and
+      (is_nil(checkpoint.active_deadline_at) or
+         checkpoint.active_deadline_at > System.system_time(:millisecond))
   end
 
   defp read_snapshot(config, tenant, id) do
@@ -461,7 +506,12 @@ defmodule Knotra.Durable do
            Knotra.ToolRuntimes.Default.prepare(call, state.definition.tools, context, true),
          true <- module in state.durable.demo_tools and validated === call.arguments,
          {:ok, row} <- Persistence.fetch(state.durable.repo, state.durable.row.tenant, state.id),
-         true <- row.revision == state.durable.row.revision and row.status == "running" do
+         true <- row.revision == state.durable.row.revision and row.status == "running",
+         :ok <-
+           if(System.monotonic_time(:millisecond) < state.deadline_at,
+             do: :ok,
+             else: {:error, :deadline_exceeded}
+           ) do
       # Only the harness can attest non-dispatch. Raw tool returns must not
       # impersonate that internal result after call/2 has already run.
       case module.call(validated, context) do

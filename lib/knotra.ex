@@ -89,7 +89,7 @@ defmodule Knotra do
     durable_call(:checkpoint, [instance, id, context])
   end
 
-  @doc "Recovers accepted/ready work or a committed tool-result continuation; never invents an answer or retries an uncertain effect."
+  @doc "Recovers supported safe points; uncertain effects require an explicit operation-ID idempotency contract and remaining budgets before another attempt."
   def recover(instance, id, definition, context) do
     durable_call(:recover, [instance, id, definition, context])
   end

@@ -175,8 +175,8 @@ Anthropic, and Gemini, including refusal/incomplete responses, absent usage, and
 text-only multi-turn continuations. Timer-ordering and credential-redaction
 regressions run without provider access. The [durable suite](test/durable_test.exs)
 also covers committed SQLite restart/race scenarios, tenant-scoped submission,
-operation-bound fake approvals, cancellation/expiry, preserved allowances and
-compatible restoration; see its [test lifecycle](docs/durable-approvals.md#verification-and-sqlite-test-lifecycle).
+operation-bound fake approvals, cancellation/expiry, preserved allowances,
+compatible restoration and explicit budgeted idempotent fake-effect recovery; see its [test lifecycle](docs/durable-approvals.md#verification-and-sqlite-test-lifecycle).
 These tests do not certify production effects or distributed ownership.
 
 For fresh-model evaluation, submit sanitized inputs with a real model plugin and
@@ -188,6 +188,7 @@ not included; see the executable scenario in `test/knotra_test.exs`.
 See [the architecture and future workflow scenarios](ARCHITECTURE.md),
 [the milestone-1 design](docs/design.md), and
 [the historical alternatives research](docs/research/elixir-agent-alternatives.md).
-The opt-in approval subset is implemented as documented above. Clarification,
+The opt-in approval subset and its narrow idempotent fake-recovery contract are
+implemented as documented above. Clarification,
 takeover, structured UI, voice, delegation and generated-code branches remain
 design work, not implemented capabilities.

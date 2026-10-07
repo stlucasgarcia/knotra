@@ -48,7 +48,14 @@ defmodule Knotra.Tool do
   path also accepts `read_only: false` definitions for proposals. Only an explicitly
   allowlisted demonstration tool may execute after a bound approval and fresh
   authorization. Its map context includes `:knotra_operation_id` for the stable
-  operation identity. Effect retries are blocked, even if `call/2` requests one.
+  operation identity. Automatic effect retries remain blocked, even if `call/2`
+  requests one. A definition may explicitly declare `idempotency: :operation_id`
+  only if the host service durably binds that identity to the unchanged arguments
+  and original outcome: duplicate concurrent/restarted calls must return that
+  outcome without another effect. Explicit `recover/4` may then make a budgeted
+  attempt with the same identity after rechecking current authorization. Best-effort
+  deduplication or a caller-supplied key alone is insufficient. This declaration is
+  a trusted host contract, not containment or proof of the service's implementation.
   Declaring read-only or allowlisting a module is not a sandbox.
   Results are strings so their representation is explicit at the model boundary.
   """

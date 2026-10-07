@@ -224,8 +224,13 @@ defmodule Knotra.Execution do
            state
        )
        when not is_nil(durable) and is_atom(reason) do
-    state = put_in(state.approval.operation.status, :not_dispatched)
-    finish(state, :failed, reason)
+    if state.durable[:retry] do
+      # Refusal of this attempt says nothing about the earlier uncertain effect.
+      refuse_dispatch(state, reason)
+    else
+      state = put_in(state.approval.operation.status, :not_dispatched)
+      finish(state, :failed, reason)
+    end
   end
 
   defp consume({:ok, {:retry, reason}}, %{stage: stage} = state)
@@ -576,10 +581,13 @@ defmodule Knotra.Execution do
         finish(state, :blocked, :invalid_tool_request)
 
       expired?(state) ->
-        finish(state, :failed, :deadline_exceeded)
+        refuse_dispatch(state, :deadline_exceeded)
 
       state.counts.tools >= state.limits.max_tool_calls ->
-        finish(state, :failed, :tool_limit)
+        refuse_dispatch(state, :tool_limit)
+
+      state.durable[:retry] == true and state.counts.retries >= state.limits.max_retries ->
+        refuse_dispatch(state, :retries_exhausted)
 
       true ->
         call = %{call | arguments: approval.arguments}
@@ -590,6 +598,14 @@ defmodule Knotra.Execution do
             | status: :dispatching,
               admitted: true
           })
+
+        state =
+          if state.durable[:retry],
+            do:
+              state
+              |> count(:retries)
+              |> event(:retry, %{reason: :uncertain_effect, operation_id: approval.operation.id}),
+            else: state
 
         state = state |> count(:tools) |> event(:tool_started, %{call: call})
         # Persist dispatch intent before entering the host boundary. The task uses
@@ -603,6 +619,16 @@ defmodule Knotra.Execution do
           {:error, reason} ->
             block_durable(state, reason)
         end
+    end
+  end
+
+  defp refuse_dispatch(state, reason) do
+    if state.durable[:retry] do
+      state
+      |> event(:retry_refused, %{reason: reason, operation_id: state.approval.operation.id})
+      |> finish(:blocked, :uncertain_effect)
+    else
+      finish(state, :failed, reason)
     end
   end
 

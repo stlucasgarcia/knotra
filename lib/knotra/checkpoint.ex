@@ -14,7 +14,7 @@ defmodule Knotra.Checkpoint do
     max_retries max_steps timeout reply results call text calls usage continuation
     accepted running waiting blocked failed completed cancelled model tool setup
     loop observation terminal_observation started model_started model_result
-    tool_started tool_result retry sequence elapsed_ms type data reason
+    tool_started tool_result retry retry_refused sequence elapsed_ms type data reason
     role content tool_calls tool_call_id metadata reasoning_details response_id function
     filename url file_id media_type assistant user system developer thinking
     image image_url audio video video_url file cache_control ephemeral

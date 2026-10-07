@@ -36,7 +36,11 @@ defmodule Knotra.DurableTest do
        name: __MODULE__,
        max_executions: 1,
        durable:
-         [repo: Repo, access: Knotra.DurableFixtures.Access, demo_tools: [F.Tool]] ++ options}
+         [
+           repo: Repo,
+           access: Knotra.DurableFixtures.Access,
+           demo_tools: [F.Tool, F.IdempotentTool, F.WeakIdempotentTool]
+         ] ++ options}
     )
   end
 
@@ -72,6 +76,394 @@ defmodule Knotra.DurableTest do
                    2_000
 
     assert F.Ledger.entries() == [["unexpected effect"]]
+  end
+
+  test "idempotent recovery reuses identity before effect, after effect and after result commit",
+       %{path: path} do
+    for phase <- [:dispatching, :effect_recorded, :succeeded] do
+      {id, definition, answer} =
+        pending_answer("idempotent-#{phase}", [max_retries: 2], F.IdempotentTool)
+
+      context =
+        if phase == :effect_recorded,
+          do: Map.put(F.scope(), :effect_gate, self()),
+          else: F.scope()
+
+      if phase != :effect_recorded, do: gate_storage(phase)
+
+      {caller, monitor} =
+        spawn_monitor(fn -> Knotra.answer(__MODULE__, id, definition, context, answer) end)
+
+      case phase do
+        :effect_recorded ->
+          assert_receive {:effect_recorded, _}, 2_000
+
+        _ ->
+          assert_receive {:storage_returned, ^phase, worker}, 2_000
+          Process.exit(worker, :kill)
+      end
+
+      {:ok, %{approval: %{operation: %{id: operation_id}}}} =
+        Knotra.snapshot(__MODULE__, id, F.scope())
+
+      stop_supervised(__MODULE__)
+      assert_receive {:DOWN, ^monitor, :process, ^caller, _}, 2_000
+      stop_supervised(Repo)
+      start_supervised!({Repo, F.repo_options(path)})
+      start_instance()
+      assert {:ok, _} = Knotra.recover(__MODULE__, id, definition, F.scope())
+      tools = if phase == :succeeded, do: 1, else: 2
+      retries = if phase == :succeeded, do: 0, else: 1
+
+      assert_receive {:knotra,
+                      %{
+                        id: ^id,
+                        status: :completed,
+                        output: "Completed: fake effect",
+                        counts: %{tools: ^tools, retries: ^retries, turns: 2, steps: 4}
+                      }},
+                     2_000
+
+      assert Enum.count(F.Ledger.operation_ids(), &(&1 == [operation_id])) == 1
+
+      assert {:ok,
+              %{
+                status: :completed,
+                approval: %{operation: %{id: ^operation_id, result: "fake effect"}}
+              }} = Knotra.recover(__MODULE__, id, definition, F.scope())
+
+      assert {:ok, %{status: :completed}} =
+               Knotra.answer(__MODULE__, id, definition, F.scope(), answer)
+    end
+
+    assert length(F.Ledger.operation_ids()) == 3
+  end
+
+  test "concurrent explicit recoveries admit one retry with unchanged approval and identity" do
+    {id, definition, answer, operation_id} = uncertain_effect("retry-race", max_retries: 2)
+
+    assert {:error, :approval_mismatch} =
+             Knotra.answer(__MODULE__, id, definition, F.scope(), %{
+               answer
+               | arguments: %{"amount" => 13}
+             })
+
+    context =
+      Map.merge(F.scope(), %{authorize_gate: self(), knotra_operation_id: "not-the-operation"})
+
+    results =
+      Task.async_stream(1..8, fn _ -> Knotra.recover(__MODULE__, id, definition, context) end,
+        max_concurrency: 8
+      )
+      |> Enum.map(fn {:ok, result} -> result end)
+
+    assert Enum.all?(results, &(match?({:ok, _}, &1) or &1 == {:error, :stale_execution}))
+    assert_receive {:business_authorizing, task}, 2_000
+    refute_receive {:business_authorizing, _}
+    assert {:ok, %{counts: %{tools: 2, retries: 1}}} = Knotra.snapshot(__MODULE__, id, F.scope())
+    assert F.Ledger.operation_ids() == [[operation_id]]
+    send(task, :continue)
+
+    assert_receive {:knotra, %{id: ^id, status: :completed, counts: %{tools: 2, retries: 1}}},
+                   2_000
+
+    assert F.Ledger.operation_ids() == [[operation_id]]
+  end
+
+  test "retry authorization refusal preserves knowledge of the original uncertain effect" do
+    {id, definition, _answer, operation_id} = uncertain_effect("retry-revoked", max_retries: 1)
+
+    assert {:error, :forbidden} =
+             Knotra.recover(__MODULE__, id, definition, %{F.scope() | permissions: []})
+
+    assert {:error, :not_found} =
+             Knotra.recover(__MODULE__, id, definition, %{F.scope() | tenant: "other"})
+
+    permission = start_supervised!({Agent, fn -> false end})
+    context = Map.put(F.scope(), :permission, permission)
+    assert {:ok, _} = Knotra.recover(__MODULE__, id, definition, context)
+
+    assert_receive {:knotra,
+                    %{
+                      id: ^id,
+                      status: :blocked,
+                      error: :uncertain_effect,
+                      counts: %{tools: 2, retries: 1},
+                      approval: %{
+                        operation: %{id: ^operation_id, status: :dispatching, result: nil}
+                      },
+                      events: events
+                    }},
+                   2_000
+
+    assert Enum.any?(
+             events,
+             &match?(
+               %{type: :retry_refused, data: %{reason: :forbidden, operation_id: ^operation_id}},
+               &1
+             )
+           )
+
+    assert {:ok, %{status: :blocked, counts: %{tools: 2, retries: 1}}} =
+             Knotra.recover(__MODULE__, id, definition, F.scope())
+
+    assert F.Ledger.operation_ids() == [[operation_id]]
+  end
+
+  test "uncertain retries cannot replenish tool, retry or active allowances" do
+    for {kind, limits} <- [
+          {:retries, [max_retries: 0]},
+          {:tools, [max_retries: 2, max_tool_calls: 1]},
+          {:time, [max_retries: 2]}
+        ] do
+      {id, definition, _answer, operation_id} = uncertain_effect("retry-limit-#{kind}", limits)
+
+      if kind == :time do
+        {:ok, saved} = Knotra.checkpoint(__MODULE__, id, F.scope())
+
+        Ecto.Adapters.SQL.query!(
+          Repo,
+          "UPDATE knotra_executions SET checkpoint = ?, revision = revision + 1 WHERE id = ?",
+          [{:blob, :erlang.term_to_binary(%{saved | remaining_ms: 0})}, id],
+          log: false
+        )
+      end
+
+      for _ <- 1..3 do
+        assert {:ok,
+                %{
+                  status: :blocked,
+                  error: :uncertain_effect,
+                  counts: %{tools: 1, retries: 0},
+                  approval: %{operation: %{id: ^operation_id, result: nil}}
+                }} = Knotra.recover(__MODULE__, id, definition, F.scope())
+      end
+
+      assert Enum.count(F.Ledger.operation_ids(), &(&1 == [operation_id])) == 1
+    end
+
+    {id, definition, _answer, operation_id} = uncertain_effect("retry-exhausted", max_retries: 1)
+
+    assert {:ok, _} =
+             Knotra.recover(
+               __MODULE__,
+               id,
+               definition,
+               Map.put(F.scope(), :effect_reply, {:retry, :temporarily_unavailable})
+             )
+
+    assert_receive {:knotra, %{id: ^id, status: :blocked, counts: %{tools: 2, retries: 1}}}, 2_000
+
+    assert {:ok, %{status: :blocked, counts: %{tools: 2, retries: 1}}} =
+             Knotra.recover(__MODULE__, id, definition, F.scope())
+
+    assert Enum.count(F.Ledger.operation_ids(), &(&1 == [operation_id])) == 1
+  end
+
+  test "model retries and uncertain-effect recovery share the same retry allowance" do
+    retries = start_supervised!({Agent, fn -> %{0 => 1} end})
+
+    definition = %{
+      F.definition(owner: self())
+      | model: {F.RepeatingModel, owner: self(), retries: retries},
+        tools: [F.IdempotentTool]
+    }
+
+    {:ok, id} =
+      Knotra.submit(__MODULE__, definition, "Propose", F.scope(), "shared-effect-retries",
+        max_retries: 1
+      )
+
+    assert_receive {:knotra, %{id: ^id, status: :waiting, approval: approval}}, 2_000
+
+    answer = %{
+      request_id: approval.id,
+      version: approval.version,
+      name: approval.name,
+      arguments: approval.arguments,
+      decision: :approve
+    }
+
+    assert {:ok, _} =
+             Knotra.answer(
+               __MODULE__,
+               id,
+               definition,
+               Map.put(F.scope(), :effect_reply, {:retry, :temporarily_unavailable}),
+               answer
+             )
+
+    assert_receive {:knotra,
+                    %{id: ^id, status: :blocked, counts: %{tools: 1, retries: 1, turns: 2}}},
+                   2_000
+
+    assert {:ok, %{status: :blocked, counts: %{tools: 1, retries: 1, turns: 2}}} =
+             Knotra.recover(__MODULE__, id, definition, F.scope())
+
+    assert length(F.Ledger.operation_ids()) == 1
+  end
+
+  test "a weak declaration or removed demonstration allowlist cannot authorize retry" do
+    for tool <- [F.Tool, F.WeakIdempotentTool] do
+      {id, definition, _answer, operation_id} =
+        uncertain_effect("weak-#{tool}", [max_retries: 2], tool)
+
+      assert {:ok, %{status: :blocked, counts: %{tools: 1, retries: 0}}} =
+               Knotra.recover(__MODULE__, id, definition, F.scope())
+
+      assert Enum.count(F.Ledger.operation_ids(), &(&1 == [operation_id])) == 1
+    end
+
+    {id, definition, _answer, _operation_id} =
+      uncertain_effect("removed-retry-allowlist", max_retries: 2)
+
+    stop_supervised(__MODULE__)
+    start_supervised!({Knotra, name: __MODULE__, durable: [repo: Repo, access: F.Access]})
+
+    assert {:ok, %{status: :blocked, counts: %{tools: 1, retries: 0}}} =
+             Knotra.recover(__MODULE__, id, definition, F.scope())
+
+    assert length(F.Ledger.operation_ids()) == 3
+  end
+
+  test "capacity refusal retains uncertainty and does not turn a retry into ready work" do
+    {id, definition, _answer, operation_id} = uncertain_effect("retry-capacity", max_retries: 1)
+    assert_receive {:model_called, _}, 2_000
+
+    {:ok, _} =
+      Knotra.submit(
+        __MODULE__,
+        F.definition(owner: self(), gated: true),
+        "Hold",
+        F.scope(),
+        "retry-blocker"
+      )
+
+    assert_receive {:model_called, _}, 2_000
+
+    assert {:ok, %{status: :blocked, error: :uncertain_effect, counts: %{tools: 1, retries: 0}}} =
+             Knotra.recover(__MODULE__, id, definition, F.scope())
+
+    assert {:error, :already_admitted} = Knotra.cancel(__MODULE__, id, F.scope())
+    stop_supervised(__MODULE__)
+    start_instance()
+    assert {:ok, _} = Knotra.recover(__MODULE__, id, definition, F.scope())
+
+    assert_receive {:knotra, %{id: ^id, status: :completed, counts: %{tools: 2, retries: 1}}},
+                   2_000
+
+    assert F.Ledger.operation_ids() == [[operation_id]]
+  end
+
+  test "reliable idempotency cannot revive cancelled, rejected or expired work" do
+    for outcome <- [:cancelled, :rejected, :expired] do
+      {id, definition, answer} =
+        pending_answer("retry-lifecycle-#{outcome}", [max_retries: 2], F.IdempotentTool)
+
+      case outcome do
+        :cancelled ->
+          assert {:ok, _} = Knotra.cancel(__MODULE__, id, F.scope())
+
+        :rejected ->
+          assert {:ok, _} =
+                   Knotra.answer(__MODULE__, id, definition, F.scope(), %{
+                     answer
+                     | decision: :reject
+                   })
+
+        :expired ->
+          {:ok, snapshot} = Knotra.snapshot(__MODULE__, id, F.scope())
+          {:ok, saved} = Knotra.checkpoint(__MODULE__, id, F.scope())
+          F.expire_deadline(id, snapshot, saved)
+      end
+
+      assert {:ok, %{status: ^outcome, counts: %{tools: 0, retries: 0}}} =
+               Knotra.recover(__MODULE__, id, definition, F.scope())
+    end
+
+    assert F.Ledger.entries() == []
+  end
+
+  test "a fresh BEAM retries an uncertain idempotent operation without another ledger effect", %{
+    path: path,
+    ledger_path: ledger_path
+  } do
+    {id, definition, _answer, operation_id} = uncertain_effect("fresh-retry", max_retries: 1)
+    stop_supervised(__MODULE__)
+    stop_supervised(Repo)
+    paths = Path.wildcard(Path.expand("_build/test/lib/*/ebin")) |> Enum.flat_map(&["-pa", &1])
+
+    {output, code} =
+      System.cmd(
+        System.find_executable("elixir"),
+        ["--erl", "+S 2:2"] ++
+          paths ++ ["test/support/answer_pending.ex", path, ledger_path, id, "retry"],
+        stderr_to_stdout: true
+      )
+
+    assert code == 0, output
+    assert output =~ "ANSWERED_AFTER_FRESH_BEAM"
+    start_supervised!({Repo, F.repo_options(path)})
+    start_instance()
+
+    assert {:ok,
+            %{
+              status: :completed,
+              counts: %{tools: 2, retries: 1},
+              approval: %{operation: %{id: ^operation_id}}
+            }} = Knotra.recover(__MODULE__, id, definition, F.scope())
+
+    assert F.Ledger.operation_ids() == [[operation_id]]
+  end
+
+  test "a stale retry result cannot overwrite a newer blocked revision" do
+    {id, definition, _answer, operation_id} = uncertain_effect("stale-retry", max_retries: 1)
+
+    assert {:ok, _} =
+             Knotra.recover(__MODULE__, id, definition, Map.put(F.scope(), :effect_gate, self()))
+
+    assert_receive {:effect_recorded, task}, 2_000
+
+    assert {:ok, %{status: :blocked, error: :incompatible_checkpoint}} =
+             Knotra.recover(__MODULE__, id, %{definition | version: "changed"}, F.scope())
+
+    gate_storage(:succeeded)
+    send(task, :continue)
+    assert_receive {:storage_returned, :succeeded, worker}, 2_000
+
+    assert {:ok,
+            %{
+              status: :blocked,
+              error: :incompatible_checkpoint,
+              counts: %{tools: 2, retries: 1},
+              approval: %{operation: %{id: ^operation_id, result: nil}}
+            }} = Knotra.snapshot(__MODULE__, id, F.scope())
+
+    Process.exit(worker, :kill)
+    assert F.Ledger.operation_ids() == [[operation_id]]
+  end
+
+  test "a failed retry-intent commit cannot consume allowances or invoke the effect" do
+    {id, definition, _answer, operation_id} =
+      uncertain_effect("failed-retry-intent", max_retries: 1)
+
+    Ecto.Adapters.SQL.query!(
+      Repo,
+      "CREATE TRIGGER fail_retry_intent BEFORE UPDATE ON knotra_executions WHEN OLD.status = 'blocked' AND NEW.status = 'running' BEGIN SELECT RAISE(FAIL, 'offline'); END",
+      [],
+      log: false
+    )
+
+    assert {:ok, _} = Knotra.recover(__MODULE__, id, definition, F.scope())
+    assert_receive {:knotra, %{id: ^id, status: :blocked, counts: %{tools: 1, retries: 0}}}, 2_000
+    assert F.Ledger.operation_ids() == [[operation_id]]
+    Ecto.Adapters.SQL.query!(Repo, "DROP TRIGGER fail_retry_intent", [], log: false)
+    assert {:ok, _} = Knotra.recover(__MODULE__, id, definition, F.scope())
+
+    assert_receive {:knotra, %{id: ^id, status: :completed, counts: %{tools: 2, retries: 1}}},
+                   2_000
+
+    assert F.Ledger.operation_ids() == [[operation_id]]
   end
 
   test "an interrupted admitted effect is blocked, never automatically retried" do
@@ -1688,8 +2080,32 @@ defmodule Knotra.DurableTest do
     on_exit(fn -> :telemetry.detach(handler) end)
   end
 
-  defp pending_answer(key, opts \\ []) do
-    definition = F.definition(owner: self())
+  defp uncertain_effect(key, opts, tool \\ F.IdempotentTool) do
+    {id, definition, answer} = pending_answer(key, opts, tool)
+
+    assert {:ok, _} =
+             Knotra.answer(
+               __MODULE__,
+               id,
+               definition,
+               Map.put(F.scope(), :effect_reply, {:retry, :temporarily_unavailable}),
+               answer
+             )
+
+    assert_receive {:knotra,
+                    %{
+                      id: ^id,
+                      status: :blocked,
+                      error: :uncertain_effect,
+                      approval: %{operation: %{id: operation_id}}
+                    }},
+                   2_000
+
+    {id, definition, answer, operation_id}
+  end
+
+  defp pending_answer(key, opts \\ [], tool \\ F.Tool) do
+    definition = %{F.definition(owner: self()) | tools: [tool]}
     {:ok, id} = Knotra.submit(__MODULE__, definition, "Propose", F.scope(), key, opts)
     assert_receive {:knotra, %{id: ^id, status: :waiting, approval: approval}}, 2_000
 
