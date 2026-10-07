@@ -1,5 +1,5 @@
-# Diagnostic gate for the parent spec's unimplemented responder-audit requirement.
-# Run explicitly with MIX_ENV=test; it is not a passing regression-suite assertion.
+# Public-interface self-check for the parent spec's responder-audit requirement.
+# Run explicitly with MIX_ENV=test; the regression suite also covers this contract.
 Code.require_file("durable_fixtures.ex", __DIR__)
 alias Knotra.DurableFixtures, as: F
 
@@ -36,7 +36,7 @@ missing =
     owner = self()
     principal = "audit-probe-approver"
 
-    context = Map.put(F.scope(), :audit_probe, {owner, principal})
+    context = Map.merge(F.scope(), %{audit_probe: {owner, principal}, responder_id: principal})
 
     {:ok, _} =
       Supervisor.start_child(supervisor, {
@@ -77,7 +77,9 @@ missing =
     [] = F.Ledger.entries()
 
     present =
-      :erlang.term_to_binary({snapshot.approval, receipts, checkpoint.approval}) =~ principal
+      snapshot.approval[:responder_id] == principal and
+        checkpoint.approval[:responder_id] == principal and
+        match?([%{responder_id: ^principal, data: %{decision: :reject}}], receipts)
 
     IO.puts("Authenticated responder recorded: #{present}; decision: rejected; effects: 0")
     not present

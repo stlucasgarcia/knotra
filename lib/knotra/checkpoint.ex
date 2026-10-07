@@ -29,7 +29,7 @@ defmodule Knotra.Checkpoint do
     persistence_failed incompatible_checkpoint interrupted unknown_tool
     write_tool_not_supported forbidden invalid_arguments model_error
     unsupported_tool_call incomplete_response empty_response provider_unavailable
-    temporarily_unavailable answered_version decision approve reject rejected approval_rejected
+    temporarily_unavailable answered_version decision responder_id approve reject rejected approval_rejected
     approved operation decided dispatching succeeded result not_dispatched dispatch_not_started
     uncertain_effect approval_mismatch expired approval_expired ready admitted operation_id active_deadline_at approval_answered request_id
   )a

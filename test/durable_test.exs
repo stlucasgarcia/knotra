@@ -508,12 +508,25 @@ defmodule Knotra.DurableTest do
 
   test "concurrent conflicting and duplicate answers dispatch at most once" do
     {id, definition, answer} = pending_answer("race-answer")
-    decisions = List.duplicate(answer, 4) ++ List.duplicate(%{answer | decision: :reject}, 4)
+
+    decisions =
+      for index <- 1..8 do
+        decision = if index <= 4, do: :approve, else: :reject
+        {%{answer | decision: decision}, "#{decision}-#{index}"}
+      end
 
     results =
       Task.async_stream(
         decisions,
-        fn a -> Knotra.answer(__MODULE__, id, definition, F.scope(), a) end,
+        fn {a, principal} ->
+          Knotra.answer(
+            __MODULE__,
+            id,
+            definition,
+            Map.put(F.scope(), :responder_id, principal),
+            a
+          )
+        end,
         max_concurrency: 8,
         ordered: false
       )
@@ -531,8 +544,19 @@ defmodule Knotra.DurableTest do
       assert F.Ledger.entries() == []
     end
 
-    repeated = %{answer | decision: snapshot.approval.decision}
-    assert {:ok, _} = Knotra.answer(__MODULE__, id, definition, F.scope(), repeated)
+    principal = snapshot.approval.responder_id
+    decision = snapshot.approval.decision
+    assert String.starts_with?(principal, "#{decision}-")
+    {:ok, checkpoint} = Knotra.checkpoint(__MODULE__, id, F.scope())
+    assert checkpoint.approval.responder_id == principal
+
+    assert [%{responder_id: ^principal, data: %{decision: ^decision}}] =
+             Enum.filter(snapshot.events, &(&1.type == :approval_answered))
+
+    repeated = %{answer | decision: decision}
+
+    assert {:ok, %{approval: %{responder_id: ^principal}}} =
+             Knotra.answer(__MODULE__, id, definition, F.scope(), repeated)
   end
 
   test "a decision committed before a lost answer acknowledgment is not dispatched on recovery" do
@@ -754,8 +778,13 @@ defmodule Knotra.DurableTest do
     assert {:error, :persistence_unavailable} =
              Knotra.answer(__MODULE__, id, definition, F.scope(), answer)
 
-    assert {:ok, %{status: :waiting, approval: %{version: 1, disposition: :pending}}} =
+    assert {:ok, %{status: :waiting, approval: %{version: 1, disposition: :pending}} = snapshot} =
              Knotra.snapshot(__MODULE__, id, F.scope())
+
+    {:ok, checkpoint} = Knotra.checkpoint(__MODULE__, id, F.scope())
+    refute Map.has_key?(snapshot.approval, :responder_id)
+    refute Map.has_key?(checkpoint.approval, :responder_id)
+    refute Enum.any?(snapshot.events, &(&1.type == :approval_answered))
 
     assert F.Ledger.entries() == []
     Ecto.Adapters.SQL.query!(Repo, "DROP TRIGGER fail_decision", [], log: false)
@@ -1278,22 +1307,26 @@ defmodule Knotra.DurableTest do
         max_tool_calls: 2
       )
 
-    for _ <- 1..2 do
-      assert_receive {:knotra, %{id: ^id, status: :waiting, approval: approval}}, 2_000
-      stop_supervised(__MODULE__)
-      start_instance()
+    answers =
+      for index <- 1..2 do
+        assert_receive {:knotra, %{id: ^id, status: :waiting, approval: approval}}, 2_000
+        stop_supervised(__MODULE__)
+        start_instance()
 
-      answer = %{
-        request_id: approval.id,
-        version: approval.version,
-        name: approval.name,
-        arguments: approval.arguments,
-        decision: :approve
-      }
+        answer = %{
+          request_id: approval.id,
+          version: approval.version,
+          name: approval.name,
+          arguments: approval.arguments,
+          decision: :approve
+        }
 
-      assert {:ok, _} = Knotra.answer(__MODULE__, id, definition, F.scope(), answer)
-      assert {:ok, _} = Knotra.answer(__MODULE__, id, definition, F.scope(), answer)
-    end
+        principal = "wait-#{index}"
+        context = Map.put(F.scope(), :responder_id, principal)
+        assert {:ok, _} = Knotra.answer(__MODULE__, id, definition, context, answer)
+        assert {:ok, _} = Knotra.answer(__MODULE__, id, definition, F.scope(), answer)
+        {answer, principal}
+      end
 
     assert_receive {:knotra,
                     %{
@@ -1303,6 +1336,17 @@ defmodule Knotra.DurableTest do
                       counts: %{turns: 5, tools: 2, retries: 2, steps: 6}
                     }},
                    2_000
+
+    {:ok, snapshot} = Knotra.snapshot(__MODULE__, id, F.scope())
+    receipts = Enum.filter(snapshot.events, &(&1.type == :approval_answered))
+    assert length(receipts) == 2
+
+    for {answer, principal} <- answers do
+      assert Enum.any?(receipts, &match?(%{data: ^answer, responder_id: ^principal}, &1))
+
+      assert {:ok, %{status: :completed}} =
+               Knotra.answer(__MODULE__, id, definition, F.scope(), answer)
+    end
 
     assert length(F.Ledger.operation_ids()) == 2
     assert_receive {:repeated_model_attempt, 0}
@@ -2203,5 +2247,106 @@ defmodule Knotra.DurableTest do
     assert snapshot.approval.operation.status == :dispatching
     assert snapshot.approval.operation.result == nil
     assert F.Ledger.operation_ids() == [[snapshot.approval.operation.id]]
+  end
+
+  test "trusted responder identity survives decisions, duplicate answers and storage reconnect",
+       %{path: path} do
+    for decision <- [:approve, :reject] do
+      {id, definition, answer} = pending_answer("audit-#{decision}")
+      principal = "trusted-#{decision}"
+
+      context =
+        Map.merge(F.scope(), %{
+          responder_id: principal,
+          credential: "AUDIT_AUTH_CANARY",
+          principal: %{name: "CHANNEL_ACTOR_CANARY", credential: "AUDIT_AUTH_CANARY"},
+          authorization: fn -> :ok end
+        })
+
+      answer = %{answer | decision: decision}
+
+      assert {:ok, %{approval: %{responder_id: ^principal}}} =
+               Knotra.answer(__MODULE__, id, definition, context, answer)
+
+      status = if decision == :approve, do: :completed, else: :rejected
+
+      if decision == :approve do
+        assert_receive {:knotra, %{id: ^id, status: :completed}}, 2_000
+      end
+
+      {:ok, before} = Knotra.snapshot(__MODULE__, id, F.scope())
+      stop_supervised(__MODULE__)
+      stop_supervised(Repo)
+      start_supervised!({Repo, F.repo_options(path)})
+      start_instance()
+
+      assert {:ok, ^before} =
+               Knotra.recover(
+                 __MODULE__,
+                 id,
+                 definition,
+                 Map.put(F.scope(), :responder_id, "recoverer")
+               )
+
+      assert {:ok, %{status: ^status, approval: %{responder_id: ^principal}}} =
+               Knotra.answer(
+                 __MODULE__,
+                 id,
+                 definition,
+                 Map.put(F.scope(), :responder_id, "different-duplicate"),
+                 answer
+               )
+
+      {:ok, snapshot} = Knotra.snapshot(__MODULE__, id, F.scope())
+      {:ok, checkpoint} = Knotra.checkpoint(__MODULE__, id, F.scope())
+      assert checkpoint.approval.responder_id == principal
+
+      assert [%{responder_id: ^principal, data: ^answer}] =
+               Enum.filter(snapshot.events, &(&1.type == :approval_answered))
+
+      bytes = :erlang.term_to_binary({snapshot, checkpoint})
+      for canary <- ["AUDIT_AUTH_CANARY", "CHANNEL_ACTOR_CANARY"], do: refute(bytes =~ canary)
+    end
+
+    assert length(F.Ledger.entries()) == 1
+  end
+
+  test "answer refuses missing or malformed host responder identities and client actor injection" do
+    {id, definition, answer} = pending_answer("audit-boundaries")
+    answer = %{answer | decision: :reject}
+    {:ok, before} = Knotra.snapshot(__MODULE__, id, F.scope())
+    legacy = Map.delete(F.scope(), :responder_id)
+    assert {:error, :forbidden} = Knotra.answer(__MODULE__, id, definition, legacy, answer)
+
+    for bad <- [
+          nil,
+          "",
+          :actor,
+          %{token: "PRIVATE_ACTOR_CANARY"},
+          self(),
+          fn -> :ok end,
+          String.duplicate("x", 257)
+        ] do
+      assert {:error, :forbidden} =
+               Knotra.answer(
+                 __MODULE__,
+                 id,
+                 definition,
+                 Map.put(F.scope(), :responder_id, bad),
+                 answer
+               )
+    end
+
+    assert {:error, :invalid_answer} =
+             Knotra.answer(
+               __MODULE__,
+               id,
+               definition,
+               F.scope(),
+               Map.put(answer, :responder_id, "client-actor")
+             )
+
+    assert {:ok, ^before} = Knotra.snapshot(__MODULE__, id, legacy)
+    assert F.Ledger.entries() == []
   end
 end

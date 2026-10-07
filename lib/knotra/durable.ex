@@ -167,6 +167,7 @@ defmodule Knotra.Durable do
             snapshot.approval
             |> Map.put(:answered_version, answer.version)
             |> Map.put(:decision, answer.decision)
+            |> Map.put(:responder_id, config.responder_id)
             |> Map.put(:version, answer.version + 1)
             |> Map.put(
               :disposition,
@@ -200,6 +201,7 @@ defmodule Knotra.Durable do
                           event -> event.elapsed_ms
                         end,
                       type: :approval_answered,
+                      responder_id: config.responder_id,
                       data: answer
                     }
                   ]
@@ -658,23 +660,32 @@ defmodule Knotra.Durable do
         policy = Keyword.fetch!(opts, :access)
         repo = Keyword.fetch!(opts, :repo)
 
-        case policy.authorize(action, id, context) do
-          {:ok, tenant} when is_binary(tenant) and tenant != "" ->
-            {:ok,
-             %{
-               repo: repo,
-               demo_tools: Keyword.get(opts, :demo_tools, []),
-               max_pending: Keyword.get(opts, :max_pending, :infinity)
-             }, tenant}
-
-          _ ->
-            {:error, :forbidden}
+        with {:ok, tenant, responder_id} <-
+               access_identity(policy.authorize(action, id, context), action) do
+          {:ok,
+           %{
+             repo: repo,
+             demo_tools: Keyword.get(opts, :demo_tools, []),
+             max_pending: Keyword.get(opts, :max_pending, :infinity),
+             responder_id: responder_id
+           }, tenant}
         end
 
       _ ->
         {:error, :durability_not_configured}
     end
   end
+
+  defp access_identity({:ok, tenant}, action)
+       when action != :answer and is_binary(tenant) and tenant != "",
+       do: {:ok, tenant, nil}
+
+  defp access_identity({:ok, tenant, responder_id}, _action)
+       when is_binary(tenant) and tenant != "" and is_binary(responder_id) and
+              byte_size(responder_id) in 1..256,
+       do: {:ok, tenant, responder_id}
+
+  defp access_identity(_, _), do: {:error, :forbidden}
 
   defp identity, do: :crypto.strong_rand_bytes(24) |> Base.url_encode64(padding: false)
   defp via(instance, key), do: {:via, Registry, {instance, key}}

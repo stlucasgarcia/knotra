@@ -157,7 +157,9 @@ defmodule Knotra.DurableFixtures.Access do
         _ -> :ok
       end
 
-      {:ok, tenant}
+      if action == :answer and Map.has_key?(context, :responder_id),
+        do: {:ok, tenant, context.responder_id},
+        else: {:ok, tenant}
     else
       {:error, :forbidden}
     end
@@ -392,6 +394,7 @@ defmodule Knotra.DurableFixtures do
   def scope,
     do: %{
       tenant: "tenant-a",
+      responder_id: "fake-approver",
       permissions: [:submit, :inspect, :recover, :checkpoint, :answer, :cancel]
     }
 

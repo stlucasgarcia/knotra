@@ -10,7 +10,7 @@ Knotra is an embedded agent harness for both autonomous background work and user
 - [CONTEXT.md](CONTEXT.md): canonical domain vocabulary, not implementation details.
 - [README.md](README.md): non-durable embedding guide and current limitations.
 - [Durable approvals](docs/durable-approvals.md): implemented opt-in APIs, recovery safe points and SQLite test evidence.
-- [Integrated approval validation](docs/approval-validation.md): executable acceptance mapping and the unmet authenticated-responder audit requirement; parent acceptance remains partial.
+- [Integrated approval validation](docs/approval-validation.md): executable acceptance mapping, authenticated-responder provenance and bounded proof; no production certification.
 - [ADR 0001](docs/adr/0001-ecto-sqlite-persistence.md): approved Ecto/SQLite dependency exception and host-owned persistence.
 - [Milestone-1 design](docs/design.md): original implementation scope and constraints.
 - [Historical alternatives research](docs/research/elixir-agent-alternatives.md): broader comparison, not current implementation evidence. Its “generated hello code only” statement predates milestone 1.
@@ -123,7 +123,7 @@ Waiting is recorded durably before acknowledging that the interaction exists. It
 
 An interaction records enough information to recover the question and validate an answer: execution and interaction identity, request version/kind, tenant binding, proposed operation and validated arguments where relevant, expiry, decision provenance, and disposition. Credentials and captured authorization closures are not durable authority. The implemented approval schema and serialization are documented in the [durable contract](docs/durable-approvals.md); future interaction kinds still need scoped formats.
 
-**Current proof gap:** the implemented decision records do not identify the authenticated responder. Host permission checks are implemented, but this provenance requirement remains unimplemented; [integrated validation](docs/approval-validation.md#unimplemented-responder-audit-completion-blocked) keeps #9 and parent acceptance incomplete.
+**Implemented responder audit:** the host returns a nonsecret authenticated responder reference for answers; the same conditional write records it with the decision in the snapshot, checkpoint and answer receipt. Duplicate delivery and recovery preserve the winning identity, never restore its authority. See the [audit follow-up](docs/approval-validation.md#responder-audit-follow-up) and [rollout limits](docs/durable-approvals.md#responder-audit-rollout).
 
 ### Checkpoints versus snapshots
 

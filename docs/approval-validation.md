@@ -1,20 +1,23 @@
 # Restart-safe approval validation
 
-Status: **partial; parent acceptance is not satisfied**. This is the evidence for
-[issue #9](https://github.com/stlucasgarcia/knotra/issues/9), against
+Status: **bounded integration evidence; responder audit implemented**. This is the
+evidence for [issue #9](https://github.com/stlucasgarcia/knotra/issues/9), against
 [the parent spec](https://github.com/stlucasgarcia/knotra/issues/2).
 
-The 19 numbered acceptance scenarios have passing executable checks within the
-SQLite/fake-operation scope below. A separate implementation requirement is
-**unimplemented**: decision records do not identify the authenticated responder.
-Its diagnostic check fails. Neither #9 nor #2 is complete.
+The original 19-scenario validation at `ede28ef` passed within the SQLite/fake
+scope, but found missing authenticated-responder provenance. The follow-up below
+implements that contract and turns its diagnostic into a passing self-check.
+The original results remain historical evidence, not the latest regression gate
+or production certification. Parent closure remains the owner's decision.
 
 ## Scope and environment
 
 Validated on 2026-10-07 with Elixir 1.20.4, OTP 29, Linux, Ecto 3.14.2,
 Ecto SQL 3.14.0 and ReqLLM 1.24.0, using the locked test dependencies.
-The runtime under test is the implementation through `4b86301`; this validation
-adds tests, test-host controls and evidence, not production runtime behavior.
+The original runtime under test was the implementation through `4b86301`;
+`ede28ef` added validation-only checks. The responder-audit follow-up changes only
+host-access result validation and the existing atomic decision record, with no
+new dependency or database schema.
 
 [ADR 0001](adr/0001-ecto-sqlite-persistence.md) authorizes this integration:
 
@@ -39,12 +42,12 @@ serialization is not a PostgreSQL or distributed-ownership proof.
 
 ## Acceptance matrix
 
-**PASS** means the cited executable assertions passed in the full 110-test run,
-not that every production interpretation of the requirement is supported.
+**PASS** below means the cited assertions passed in the historical 110-test run
+at `ede28ef`, not that every production interpretation is supported.
 `D:<line>` selects `test/durable_test.exs:<line>` with `mix test`; `K` selects
 `test/knotra_test.exs`, and `R` selects `test/req_llm_test.exs`.
-These selectors refer to this evidence revision; test names are the stable
-wayfinding aid if later edits move them.
+These selectors refer to `ede28ef`; use that revision for those exact locations.
+Test names are the stable wayfinding aid in the updated tree.
 
 | Parent scenario | Executable checks and asserted boundary | Result |
 |---|---|---|
@@ -80,46 +83,82 @@ and recovery supply the assertions; no private execution-process state is
 inspected. Trigger failures and revision corruption are test-host fault
 injection, not additional public APIs.
 
-## Unimplemented responder audit; completion blocked
+## Responder audit follow-up
 
 The parent requires:
 
 > Decision records identify the authenticated responder and result without
 > persisting credentials.
 
-Current [Access](../lib/knotra/access.ex) authorization returns a tenant,
-not an authenticated responder reference. The
-[decision transition](../lib/knotra/durable.ex) records the answer/disposition
-but no responder. Permission checking passes; authenticated decision provenance
-does not. Dumping the private authorization context, or accepting an actor
-name from model/channel input, would not satisfy this requirement.
+The owner authorized the scoped host identity/audit contract after the original
+validation reported this gap.
 
-The explicit [audit diagnostic](../test/support/probe_approval_audit.exs)
+The original [Access](../lib/knotra/access.ex) contract returned only a tenant.
+It now requires `{:ok, tenant_id, responder_id}` for `:answer`, with a nonsecret,
+host-authenticated binary reference of 1–256 bytes. Missing/malformed identities
+and tenant-only answer policies fail closed. Other actions retain tenant-only
+support; actor identity never comes from the five-field answer or model arguments.
+
+The existing [decision transition](../lib/knotra/durable.ex) conditionally writes
+`approval.responder_id` in both checkpoint and snapshot, plus the same top-level
+field on the `:approval_answered` receipt. This is the same revision/deadline
+write as the decision, not a subsequent audit update. Duplicate answers, another
+responder and recovery preserve the winning identity; later requests retain prior
+identities in their receipts. Failed commits publish neither decision nor actor.
+
+The explicit [audit self-check](../test/support/probe_approval_audit.exs)
 selects a known fake host principal, observes successful host authorization,
 rejects the proposal, and examines the public decision receipt and private
-approval checkpoint. It confirms zero effects and the missing principal:
+approval checkpoint. It asserts the exact selected principal in both records
+and the rejection receipt, with zero effects:
 
 ```sh
 MIX_ENV=test mix run --no-start test/support/probe_approval_audit.exs
 ```
 
-Observed output: `Authenticated responder recorded: false; decision: rejected;
-effects: 0`, then `UNIMPLEMENTED` and **exit 1**. This intentionally failing
-acceptance diagnostic is outside the passing regression suite. Do not suppress
-its failure or count 110 passing tests as complete parent acceptance.
+Original result at `ede28ef`: `Authenticated responder recorded: false`, then
+`UNIMPLEMENTED` and exit 1. Current result: `Authenticated responder recorded:
+true; decision: rejected; effects: 0`, **exit 0**.
 
-Completing this needs a scoped host identity/audit contract and atomic decision
-recording, with tests for authenticated identity, duplicate/conflicting answers
-and credential exclusion. This validation does not choose that contract or
-change product code. Historical records must not be assigned invented actors.
+Regression coverage in [durable tests](../test/durable_test.exs) includes
+`trusted responder identity survives decisions, duplicate answers and storage reconnect`
+and `answer refuses missing or malformed host responder identities and client actor injection`.
+Existing conflicting-answer, failed-decision-commit, sequential-approval and
+fresh-BEAM checks now also assert provenance. Private objects, credentials and
+captured authorization remain excluded. Historical records without an actor are
+not backfilled; see [rollout compatibility](durable-approvals.md#responder-audit-rollout).
 
-## Commands and results
+## Current follow-up gates
+
+```sh
+ERL_FLAGS='+S 2:2' MIX_ENV=test mix compile --warnings-as-errors
+ERL_FLAGS='+S 2:2' mix format --check-formatted
+ERL_FLAGS='+S 2:2' mix test --warnings-as-errors
+ERL_FLAGS='+S 2:2' MIX_ENV=test mix run --no-start test/support/probe_approval_audit.exs
+git diff --check
+```
+
+- **112 tests PASS**, seed `205230`, 36.8 seconds; the durable suite also passed
+  independently (**80 tests**, seed `803116`). Compilation, formatting and
+  whitespace pass; the responder self-check exits 0 with zero effects.
+- An earlier follow-up full run passed 109/112: existing offline ReqLLM timing
+  checks and a Repo-setup checkout failed. Some isolated retries also failed.
+  Local measurements showed CPU saturation and 28–43 runnable processes;
+  limiting this VM to two schedulers reduced its resource use. The eventual
+  passing run does not isolate every intermittent cause or certify reliability.
+  No test timeout, pool setting, production code outside this contract or
+  unrelated process was changed to obtain the pass.
+- SQLite settings and production/ownership limits remain as disclosed above;
+  this audit fix does not certify the configured-but-unasserted ledger PRAGMAs
+  or effective busy timeout.
+
+## Historical validation at `ede28ef`
 
 ```sh
 MIX_ENV=test mix compile --warnings-as-errors
 mix format --check-formatted
 mix test --warnings-as-errors
-# Separate unmet-acceptance diagnostic, expected to fail today:
+# This original diagnostic failed at that revision:
 MIX_ENV=test mix run --no-start test/support/probe_approval_audit.exs
 git diff --check
 ```
@@ -127,9 +166,9 @@ git diff --check
 - Compilation, formatting and whitespace: **PASS**.
 - Existing offline and SQLite regression/acceptance suites: **110 PASS**,
   seed `626605`, 30.1 seconds. No live provider or production operation ran.
-- Responder audit diagnostic: **FAIL / UNIMPLEMENTED**, exit 1; #9 completion
-  and #2 acceptance therefore **BLOCKED**. No check was substituted with an
-  in-memory durability simulation.
+- Original responder audit diagnostic at `ede28ef`: **FAIL / UNIMPLEMENTED**,
+  exit 1. The follow-up self-check passes with exact identity assertions. No
+  check was substituted with an in-memory durability simulation.
 - The first expanded full run had two failures in existing cases: the
   2-second pending-observation assertion at D:1396 and a 4-second connection
   checkout during setup of D:1475. The two cases and both added tests then
@@ -191,7 +230,8 @@ Foundational slices: [storage decision #3](https://github.com/stlucasgarcia/knot
 [lifecycle #6](https://github.com/stlucasgarcia/knotra/issues/6),
 [limits/compatibility #7](https://github.com/stlucasgarcia/knotra/issues/7), and
 [idempotent fake recovery #8](https://github.com/stlucasgarcia/knotra/issues/8).
-Their completion does not resolve the responder-audit gap or close the parent.
+The responder-audit follow-up resolves the recorded provenance gap, not the
+production and comparative limitations or parent closure.
 
 [dsh]: https://github.com/deepseek-ai/deepseek-harness/blob/639ed015397290b3745d163aafe02ffee4aa3f84/packages/interaction/user-approval/README.md
 [langgraph]: https://docs.langchain.com/oss/python/langgraph/interrupts

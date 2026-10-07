@@ -45,7 +45,10 @@ try do
        status: :completed,
        output: "Completed: fake effect",
        counts: %{turns: 2, tools: ^tools, retries: ^retries},
-       approval: %{operation: %{id: operation_id, result: "fake effect"}}
+       approval: %{
+         responder_id: "fake-approver",
+         operation: %{id: operation_id, result: "fake effect"}
+       }
      }} ->
       [[^operation_id]] = F.Ledger.operation_ids()
   after
