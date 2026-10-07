@@ -141,8 +141,26 @@ end
 
 defmodule Knotra.DurableFixtures.Access do
   @behaviour Knotra.Access
-  def authorize(action, _id, %{tenant: tenant, permissions: permissions}) do
-    if action in permissions, do: {:ok, tenant}, else: {:error, :forbidden}
+  def authorize(action, _id, %{tenant: tenant, permissions: permissions} = context) do
+    if action in permissions do
+      # Test-only controls at the host authorization boundary; neither grants access.
+      if action == :submit and context[:before_acceptance] do
+        send(context.before_acceptance, {:before_acceptance, self()})
+
+        receive do
+          :continue -> :ok
+        end
+      end
+
+      case {action, context[:audit_probe]} do
+        {:answer, {owner, principal}} -> send(owner, {:authorized_as, principal})
+        _ -> :ok
+      end
+
+      {:ok, tenant}
+    else
+      {:error, :forbidden}
+    end
   end
 
   def authorize(_, _, _), do: {:error, :forbidden}

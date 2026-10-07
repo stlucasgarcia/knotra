@@ -2131,4 +2131,77 @@ defmodule Knotra.DurableTest do
     assert {:ok, checkpoint} = Knotra.checkpoint(__MODULE__, id, F.scope())
     refute inspect(checkpoint) =~ inspect(self())
   end
+
+  test "a caller killed before acceptance cannot acknowledge work or start a model" do
+    owner = self()
+
+    definition = F.definition(owner: owner)
+
+    {caller, monitor} =
+      spawn_monitor(fn ->
+        result =
+          Knotra.submit(
+            __MODULE__,
+            definition,
+            "Propose",
+            Map.put(F.scope(), :before_acceptance, owner),
+            "before-acceptance"
+          )
+
+        send(owner, {:unexpected_ack, result})
+      end)
+
+    on_exit(fn -> if Process.alive?(caller), do: Process.exit(caller, :kill) end)
+    assert_receive {:before_acceptance, ^caller}, 2_000
+    refute_receive {:model_called, _}
+    Process.exit(caller, :kill)
+    assert_receive {:DOWN, ^monitor, :process, ^caller, :killed}
+    refute_receive {:unexpected_ack, _}
+
+    assert {:ok, id} =
+             Knotra.submit(__MODULE__, definition, "Propose", F.scope(), "before-acceptance")
+
+    assert_receive {:knotra, %{id: ^id, status: :waiting}}, 2_000
+
+    assert {:ok, ^id} =
+             Knotra.submit(__MODULE__, definition, "Propose", F.scope(), "before-acceptance")
+
+    assert F.Ledger.entries() == []
+  end
+
+  test "durable malformed tool failures exclude credential and private-state canaries" do
+    definition = F.definition(owner: self(), private_option: "DURABLE_PRIVATE_CANARY")
+
+    context =
+      Map.merge(F.scope(), %{
+        credential: "DURABLE_AUTH_CANARY",
+        effect_reply: {:error, "DURABLE_FAILURE_CANARY"}
+      })
+
+    assert {:ok, id} =
+             Knotra.submit(__MODULE__, definition, "Propose", context, "durable-failure-canaries")
+
+    assert_receive {:knotra, %{id: ^id, status: :waiting, approval: approval}}, 2_000
+
+    answer = %{
+      request_id: approval.id,
+      version: approval.version,
+      name: approval.name,
+      arguments: approval.arguments,
+      decision: :approve
+    }
+
+    assert {:ok, _} = Knotra.answer(__MODULE__, id, definition, context, answer)
+    assert_receive {:knotra, %{id: ^id, status: :blocked, error: :uncertain_effect}}, 2_000
+    assert {:ok, snapshot} = Knotra.snapshot(__MODULE__, id, F.scope())
+    assert {:ok, checkpoint} = Knotra.checkpoint(__MODULE__, id, F.scope())
+    bytes = :erlang.term_to_binary({snapshot, checkpoint})
+
+    for canary <- ["DURABLE_PRIVATE_CANARY", "DURABLE_AUTH_CANARY", "DURABLE_FAILURE_CANARY"],
+        do: refute(bytes =~ canary)
+
+    assert snapshot.approval.operation.status == :dispatching
+    assert snapshot.approval.operation.result == nil
+    assert F.Ledger.operation_ids() == [[snapshot.approval.operation.id]]
+  end
 end

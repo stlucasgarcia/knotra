@@ -4,7 +4,7 @@ Implemented scope: [issue #4](https://github.com/stlucasgarcia/knotra/issues/4),
 
 **Works:** commit-before-acknowledgment acceptance, tenant-scoped submission deduplication, a model-proposed operation, validated/authorized pending approval, approval/rejection by request identity and version, sequential explicitly allowlisted fake operations, preserved budgets and model continuation, bounded outstanding work, recoverable capacity-waiting decisions, stable inspection after restart, durable pre-admission cancellation, persisted response expiry on access, private versioned checkpoints, and explicit stable-ID recovery of reliably idempotent fake effects. Pending/terminal durable workers exit rather than retaining process handles.
 
-**Does not work yet:** production consequential operations, approval edits, parallel/batched operations, cancellation of arbitrary active work by durable identity, background expiry sweeping, automatic background draining, autonomous retry of interrupted model work or uncertain effects, PostgreSQL certification, or distributed ownership. Answer admission checks expiry, including at the SQLite conditional write; there is no expiry scheduler.
+**Does not work yet:** authenticated-responder references in decision audit records, production consequential operations, approval edits, parallel/batched operations, cancellation of arbitrary active work by durable identity, background expiry sweeping, automatic background draining, autonomous retry of interrupted model work or uncertain effects, PostgreSQL certification, or distributed ownership. Answer admission checks expiry, including at the SQLite conditional write; there is no expiry scheduler.
 
 ## Host setup
 
@@ -153,7 +153,7 @@ Expiry preserves consumed counts and remaining active allowance, ends this attem
 
 ## Verification and SQLite test lifecycle
 
-Run `mix test test/durable_test.exs --warnings-as-errors` for the public-interface persistence scenarios. Run the existing suite separately or the full suite for regressions. No provider credentials or production effects are needed.
+Run `mix test test/durable_test.exs --warnings-as-errors` for the public-interface persistence scenarios. Run the existing suite separately or the full suite for regressions. No provider credentials or production effects are needed. The [integrated validation evidence](approval-validation.md) maps the parent acceptance scenarios and records the separate failing responder-audit diagnostic; passing regression tests do not complete #9 or the parent specification.
 
 The test host uses committed, file-backed databases in private directories under ignored `_build/persistence-tests/`. It initializes migrations with one connection, then restarts with two connections, avoiding concurrent initial journal setup. Effective WAL mode, FULL synchronization and foreign keys are asserted. Exqlite 0.41 uses a cancellation-aware busy handler: the configured timeout is 5 seconds, while `PRAGMA busy_timeout` reports zero. Do not replace that handler with a PRAGMA just to make a configuration assertion pass. Concurrent submissions exercise independent writers; SQLite serializes writes, not business effects.
 

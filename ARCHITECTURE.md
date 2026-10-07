@@ -10,6 +10,7 @@ Knotra is an embedded agent harness for both autonomous background work and user
 - [CONTEXT.md](CONTEXT.md): canonical domain vocabulary, not implementation details.
 - [README.md](README.md): non-durable embedding guide and current limitations.
 - [Durable approvals](docs/durable-approvals.md): implemented opt-in APIs, recovery safe points and SQLite test evidence.
+- [Integrated approval validation](docs/approval-validation.md): executable acceptance mapping and the unmet authenticated-responder audit requirement; parent acceptance remains partial.
 - [ADR 0001](docs/adr/0001-ecto-sqlite-persistence.md): approved Ecto/SQLite dependency exception and host-owned persistence.
 - [Milestone-1 design](docs/design.md): original implementation scope and constraints.
 - [Historical alternatives research](docs/research/elixir-agent-alternatives.md): broader comparison, not current implementation evidence. Its “generated hello code only” statement predates milestone 1.
@@ -121,6 +122,8 @@ accepted work → runnable → active → completed / failed / cancelled
 Waiting is recorded durably before acknowledging that the interaction exists. It releases active execution capacity; it does not require a live process per waiting user. The implemented `max_pending` option bounds all outstanding durable records in the configured Repo, including blocked work; its default is `:infinity`, so hosts must configure a bound when required. Terminal-history retention remains host-owned. A separate human-response deadline governs waiting; active-work allowances and aggregate counters do not reset on resume. Silence never approves. Expiry is currently materialized on authorized lifecycle access, not by a background sweeper.
 
 An interaction records enough information to recover the question and validate an answer: execution and interaction identity, request version/kind, tenant binding, proposed operation and validated arguments where relevant, expiry, decision provenance, and disposition. Credentials and captured authorization closures are not durable authority. The implemented approval schema and serialization are documented in the [durable contract](docs/durable-approvals.md); future interaction kinds still need scoped formats.
+
+**Current proof gap:** the implemented decision records do not identify the authenticated responder. Host permission checks are implemented, but this provenance requirement remains unimplemented; [integrated validation](docs/approval-validation.md#unimplemented-responder-audit-completion-blocked) keeps #9 and parent acceptance incomplete.
 
 ### Checkpoints versus snapshots
 
