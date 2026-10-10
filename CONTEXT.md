@@ -14,6 +14,15 @@ The configuration describing an agent's behavior and available tools, distinct f
 One accepted work request performed using a particular agent definition. Multiple executions may use the same definition.
 _Avoid_: Agent (when referring to one execution)
 
+**Swarm**:
+A coordinated group of executions pursuing one objective under a shared root execution's budgets and cancellation scope.
+
+**Shared board**:
+A swarm-scoped collection of findings, decisions, and artifact references, organized by topic or task rather than addressed to one recipient.
+
+**Execution inbox**:
+Messages addressed to one execution, such as assignments, questions, replies, and handoffs, distinct from the swarm's shared board.
+
 **Conversation**:
 An ongoing interaction history that may contain multiple executions. Answering a pending question continues its execution; an independent work request starts another.
 

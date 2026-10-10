@@ -75,7 +75,7 @@ Channels are adapters, not authorities. A UI event, transcript, generated progra
 execution
 ├── autonomous background
 │   ├── model/tool loop [implemented, read-only, non-durable]
-│   └── bounded delegation [planned]
+│   └── bounded delegation and swarms [planned]
 ├── human interaction
 │   ├── input request → answer → continue same execution [planned]
 │   ├── approval → approve / reject / expire / pre-admission cancel [implemented, opt-in fake-operation slice]
@@ -98,11 +98,25 @@ A conversation contains interaction history and may span multiple executions. Ea
 
 No conversation store or cross-execution history-ordering/merge contract is implemented. A later scoped design must define append ordering, concurrent submissions, duplicate delivery and where resumed outputs join the history. An execution's ordered events do not establish an order across executions; neither observer arrival nor token-stream arrival may be assumed authoritative.
 
-### Autonomous work and delegation
+### Autonomous work, delegation, and swarms — planned
 
 An unattended agent can act only within host-granted capabilities. Child work shares the root execution's aggregate budget and cancellation scope; delegation cannot expand authority or reset counters. A required human decision creates a wait even when no channel is connected.
 
-Before implementing concurrent children, budget reservations and parent/child recovery must prevent simultaneous overspend and duplicate dispatch. A replayed parent must not blindly recreate children. Delegation topology and scheduling are not selected here.
+The agreed swarm direction is independently supervised executions with a shallow, bounded delegation hierarchy. Parent/child relationships track responsibility, not nested OTP supervision. Authorized peers may communicate directly. Reuse the existing execution GenServers, Task.Supervisor and DynamicSupervisor; a small coordinator GenServer per swarm owns admission, budget reservations and child tracking, not all message traffic. No separate process per inbox or topic is required.
+
+Worker failure is isolated by default: unrelated executions continue and the failed work remains inspectable. The root execution cannot report successful completion while required work is failed, blocked or incomplete. Root-wide cancellation, deadlines and shared-budget exhaustion still prevent new dispatch across the swarm; failure isolation does not bypass those limits.
+
+Each swarm has one logical shared board for findings, decisions and artifact references, plus an inbox addressed to each execution for assignments, questions, replies and handoffs. Board content is organized by topic/task and retrieved selectively; do not broadcast every post into every model context. Task ownership and completion are authoritative state, not inferred from messages. Normal inbox messages enter model context at defined turn boundaries; cancellation remains a runtime lifecycle operation.
+
+Accepted swarm work, shared-board posts and inbox messages must survive a host restart. Use the host-owned Repo for task/parent-child identities, queued/runnable state, shared-budget reservations and consumption, board entries, inbox entries and consumption markers, and compatible execution checkpoints. Acknowledge work acceptance or message posting only after commit. A BEAM mailbox is not a durable inbox; process notifications are wakeups, not authoritative state. Address messages by stable execution identities and define acknowledgments and duplicate-safe consumption without claiming exactly-once delivery.
+
+Recovery restores compatible safe checkpoints, prior budgets and existing child identities under fresh host authorization. Never blindly repeat an uncertain operation: use its proven idempotency contract or visibly block for reconciliation. Host authorization governs board/inbox access and tenant/swarm isolation; messages never grant tool authority. Bound delegation depth, spawning, queues, inbox/message sizes and notification fanout. Swarm membership and simultaneous model calls need separate limits.
+
+The capacity requirement is hundreds of simultaneous model calls, not merely hundreds of swarm members. This is a target, not an implemented or benchmarked capability. Model admission must distinguish in-flight concurrency, provider request/token quotas and shared root budgets; execution-count limits alone are insufficient. Quota scope follows the host's provider/account/model configuration and may span multiple swarms. Model I/O remains in supervised tasks, never inside coordinator callbacks. Validate HTTP pool capacity, context/continuation memory, coordinator responsiveness and storage contention under concurrent load before claiming support.
+
+When model-call capacity or provider quotas are exhausted, work waits in a bounded, cancellation-aware queue with fair admission across swarms sharing the quota scope. Reject new work explicitly when the queue is full. Queued work does not hold an in-flight model-call permit. Persist queue admission before acknowledging accepted swarm work and preserve queue bounds across recovery. This is planned swarm behavior, not a change to current `start/5` capacity rejection or non-durable acceptance.
+
+Before implementing concurrent children, budget reservations and parent/child recovery must prevent simultaneous overspend and duplicate dispatch. A replayed parent must not blindly recreate children. Required-work designation, retry/escalation policy, the exact concurrency target, queue bounds/wait deadlines, fairness algorithm, checkpoint/message formats, message ordering/acknowledgment details and retention policy remain open. Hundreds of simultaneous calls alone do not select multi-node deployment or supersede the SQLite-first decision in ADR 0001; expand infrastructure only against measured constraints.
 
 ## 4. Durable interaction lifecycle — implemented approval subset, planned expansion
 
@@ -269,7 +283,7 @@ Current baseline command: `mix test --warnings-as-errors`. It runs both the non-
 4. Add bounded delegation or restricted generated computation only with its shared-budget and failure tests.
 5. Select live-audio and general-purpose isolation backends separately; do not pull their complexity into the first interactive slice.
 
-This is sequencing guidance, not approval to implement those slices. The SQLite schema, conditional revisions, checkpoint format and optional pending-admission bound are already implemented. Remaining choices include distributed ownership/deployment protocols, PostgreSQL integration, conversation-history ordering, parent/child scheduling, UI wire schema, audio providers/protocol and quality thresholds, generated language/isolation backend, and operation-specific reconciliation. Future behavioral boundaries do not certify those integrations; each needs a scoped decision and evidence. No speculative behaviours, graph scheduler, frontend framework, or sandbox dependency are added now.
+This is sequencing guidance, not approval to implement those slices. The SQLite schema, conditional revisions, checkpoint format and optional pending-admission bound are already implemented. Remaining choices include distributed ownership/deployment protocols, PostgreSQL integration, conversation-history ordering, swarm scheduling, restart-safe swarm/message formats, message ordering/acknowledgment details and retention policy, UI wire schema, audio providers/protocol and quality thresholds, generated language/isolation backend, and operation-specific reconciliation. Future behavioral boundaries do not certify those integrations; each needs a scoped decision and evidence. No speculative behaviours, graph scheduler, frontend framework, or sandbox dependency are added now.
 
 [deepseek]: https://deepseek.com/harness/en/
 [dsh-agent]: https://github.com/deepseek-ai/deepseek-harness/blob/639ed015397290b3745d163aafe02ffee4aa3f84/packages/core/agent/README.md
