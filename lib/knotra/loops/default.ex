@@ -8,6 +8,12 @@ defmodule Knotra.Loops.Default do
   @impl true
   def next(_view, :model), do: {:model, :reply}
 
+  def next(
+        %{last: {:model, %{calls: [], input_request: %{prompt: _} = request}}},
+        :reply
+      ),
+      do: {:input, request, :reply}
+
   def next(%{last: {:model, %{calls: [], text: text}}}, :reply), do: {:done, text}
   def next(%{last: {:model, %{calls: calls}}}, :reply), do: next(%{}, {:tools, calls})
   def next(_view, {:tools, []}), do: {:model, :reply}

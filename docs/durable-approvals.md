@@ -1,10 +1,10 @@
 # Durable submission and pending approvals
 
-Implemented scope: [issue #4](https://github.com/stlucasgarcia/knotra/issues/4), the constrained fake-operation demonstration in [issue #5](https://github.com/stlucasgarcia/knotra/issues/5), waiting cancellation/expiry in [issue #6](https://github.com/stlucasgarcia/knotra/issues/6), allowances/capacity/compatible restoration in [issue #7](https://github.com/stlucasgarcia/knotra/issues/7), and explicitly budgeted idempotent fake-effect recovery in [issue #8](https://github.com/stlucasgarcia/knotra/issues/8), using the [SQLite-first Ecto decision](adr/0001-ecto-sqlite-persistence.md). This is an opt-in path alongside the existing non-durable `Knotra.start/5`, not production ownership/recovery certification.
+Implemented scope: [issue #4](https://github.com/stlucasgarcia/knotra/issues/4), the constrained fake-operation demonstration in [issue #5](https://github.com/stlucasgarcia/knotra/issues/5), waiting cancellation/expiry in [issue #6](https://github.com/stlucasgarcia/knotra/issues/6), allowances/capacity/compatible restoration in [issue #7](https://github.com/stlucasgarcia/knotra/issues/7), explicitly budgeted idempotent fake-effect recovery in [issue #8](https://github.com/stlucasgarcia/knotra/issues/8), and the restart-safe input-request (clarification) round-trip in [issue #11](https://github.com/stlucasgarcia/knotra/issues/11), using the [SQLite-first Ecto decision](adr/0001-ecto-sqlite-persistence.md). This is an opt-in path alongside the existing non-durable `Knotra.start/5`, not production ownership/recovery certification.
 
-**Works:** commit-before-acknowledgment acceptance, tenant-scoped submission deduplication, a model-proposed operation, validated/authorized pending approval, approval/rejection by request identity and version with atomic authenticated-responder provenance, sequential explicitly allowlisted fake operations, preserved budgets and model continuation, bounded outstanding work, recoverable capacity-waiting decisions, stable inspection after restart, durable pre-admission cancellation, persisted response expiry on access, private versioned checkpoints, and explicit stable-ID recovery of reliably idempotent fake effects. Pending/terminal durable workers exit rather than retaining process handles.
+**Works:** commit-before-acknowledgment acceptance, tenant-scoped submission deduplication, a model-proposed operation, validated/authorized pending approval, approval/rejection by request identity and version with atomic authenticated-responder provenance, sequential explicitly allowlisted fake operations, preserved budgets and model continuation, bounded outstanding work, recoverable capacity-waiting decisions, stable inspection after restart, durable pre-admission cancellation, persisted response expiry on access, private versioned checkpoints, an authorized clarification round-trip that continues the same execution after restart, and explicit stable-ID recovery of reliably idempotent fake effects. Pending/terminal durable workers exit rather than retaining process handles.
 
-**Does not work yet:** production consequential operations, approval edits, parallel/batched operations, cancellation of arbitrary active work by durable identity, background expiry sweeping, automatic background draining, autonomous retry of interrupted model work or uncertain effects, PostgreSQL certification, or distributed ownership. Answer admission checks expiry, including at the SQLite conditional write; there is no expiry scheduler.
+**Does not work yet:** production consequential operations, approval edits, parallel/batched operations, cancellation of arbitrary active work by durable identity, background expiry sweeping, automatic background draining, automatic clarification chains or in-place editing, autonomous retry of interrupted model work or uncertain effects, PostgreSQL certification, or distributed ownership. Answer admission checks expiry, including at the SQLite conditional write; there is no expiry scheduler.
 
 ## Host setup
 
@@ -47,7 +47,7 @@ The instance's `max_executions` bounds active workers, including durable workers
 
 Optional `durable: [max_pending: positive_integer]` (default `:infinity`) bounds **all outstanding records in the configured Repo**, across tenants and restarts—not just currently waiting approvals. Acceptance uses one SQLite conditional insert, so concurrent writers cannot exceed the configured bound. Excess submissions return `{:error, :pending_limit}` without acceptance. Existing submission keys still deduplicate or report conflict at capacity. Accepted/running/waiting/decided/ready and blocked/reconciliation work occupy this bound; completed/failed/rejected/cancelled/expired records release it. Lazy expiry must be discovered before its row releases capacity. Configure the same bound for writers sharing a Repo. This is admission control, not terminal-history retention or a hard monetary limit; the host still owns storage retention.
 
-Public records contain `:accepted`, `:running`, `:waiting`, `:decided`, `:ready`, `:rejected`, `:cancelled`, `:expired`, `:completed`, `:failed` or `:blocked` status, ordered events, consumed counts and an optional approval. The approval includes stable identity, request version, originating call ID, operation name, validated arguments, `:pending` disposition and wall-clock expiry. Argument validation and host tool authorization run before the request is published. Expiry starts when the pending request is prepared. An observer receives public snapshots only after the corresponding database update; missing/failed delivery is not proof that a committed request was lost. Re-query the record. For worker-produced terminal records, a separately supervised notifier waits for the execution supervisor to release the worker's slot before invoking the observer. Its observer call is bounded to one second; a slow or failed observer cannot retain active execution capacity.
+Public records contain `:accepted`, `:running`, `:waiting`, `:decided`, `:ready`, `:rejected`, `:cancelled`, `:expired`, `:completed`, `:failed` or `:blocked` status, ordered events, consumed counts and an optional approval plus an optional input request. An approval includes stable identity, request version, originating call ID, operation name, validated arguments, `:pending` disposition and wall-clock expiry. A pending input request includes stable identity, request version, prompt, `:pending` disposition and wall-clock expiry. Argument validation and host tool authorization run before the request is published. Expiry starts when the pending request is prepared. An observer receives public snapshots only after the corresponding database update; missing/failed delivery is not proof that a committed request was lost. Re-query the record. For worker-produced terminal records, a separately supervised notifier waits for the execution supervisor to release the worker's slot before invoking the observer. Its observer call is bounded to one second; a slow or failed observer cannot retain active execution capacity.
 
 ## Safe points and recovery limits
 
@@ -89,11 +89,81 @@ answer = %{
 {:ok, record} = Knotra.answer(MyApp.Agents, execution_id, definition, fresh_host_context, answer)
 ```
 
-The answer map must contain exactly these five fields. Identity/version and the exact validated arguments must match; numeric coercion is not accepted. Expired, incompatible, unauthorized and wrong-tenant answers cannot dispatch. A rejection records terminal `:rejected` / `:approval_rejected` with no replacement proposal. The conditional decision increments the request version and retains the answered version for duplicate detection. Repeating the identical authorized answer is harmless, including an earlier answer after a later request is published; a conflicting answer fails. The conditional decision write records the host-returned `approval.responder_id` in both snapshot and checkpoint, and `:approval_answered` events retain the same top-level `responder_id` alongside the unchanged five-field answer in `data`. Duplicate delivery, another responder and recovery cannot replace the original winning identity. Historical receipts preserve each request's responder after later approvals. `:tool_result` events retain completed operation identities. A successful return acknowledges a persisted disposition, **not** necessarily completion of its effect or final model call. Inspect the execution to see the current outcome.
+The answer map must contain exactly these five fields. Identity/version and the exact validated arguments must match; numeric coercion is not accepted. This five-field shape is for approvals; an input request uses the three-field map in [Input requests](#input-requests-clarification). Expired, incompatible, unauthorized and wrong-tenant answers cannot dispatch. A rejection records terminal `:rejected` / `:approval_rejected` with no replacement proposal. The conditional decision increments the request version and retains the answered version for duplicate detection. Repeating the identical authorized answer is harmless, including an earlier answer after a later request is published; a conflicting answer fails. The conditional decision write records the host-returned `approval.responder_id` in both snapshot and checkpoint, and `:approval_answered` events retain the same top-level `responder_id` alongside the unchanged five-field answer in `data`. Duplicate delivery, another responder and recovery cannot replace the original winning identity. Historical receipts preserve each request's responder after later approvals. `:tool_result` events retain completed operation identities. A successful return acknowledges a persisted disposition, **not** necessarily completion of its effect or final model call. Inspect the execution to see the current outcome.
 
 Approval records a stable `approval.operation.id` before starting a continuation worker. That worker conditionally records dispatch intent and consumed tool count before invoking the tool. It revalidates arguments, checks current host business authorization, and checks its persisted revision before `call/2`. Both authorization and invocation receive the stable ID as `context.knotra_operation_id`; model arguments cannot supply or replace it. The independent test ledger records that ID and survives execution restarts. The operation result is checkpointed before advancing the restored loop/model exchange.
 
-An effect error, retry request, timeout, lost result, or crash after dispatch admission is conservatively `:blocked` / `:uncertain_effect`, even if it might not have run. No retry is automatic and no exactly-once claim is made. If capacity is unavailable after recording the decision, `:ready` preserves it for explicit recovery or exact-answer redelivery with fresh context. Other continuation-start failures block with `:dispatch_not_started`; duplicate answers cannot restart blocked work. Explicit recovery is limited to the idempotency contract below; non-idempotent outcomes still require host investigation. The integrated acceptance matrix is complete ([validation evidence](approval-validation.md)); the spec's deferred expansion branches (clarification/takeover, presentation, voice, delegation, generated code) remain future work.
+An effect error, retry request, timeout, lost result, or crash after dispatch admission is conservatively `:blocked` / `:uncertain_effect`, even if it might not have run. No retry is automatic and no exactly-once claim is made. If capacity is unavailable after recording the decision, `:ready` preserves it for explicit recovery or exact-answer redelivery with fresh context. Other continuation-start failures block with `:dispatch_not_started`; duplicate answers cannot restart blocked work. Explicit recovery is limited to the idempotency contract below; non-idempotent outcomes still require host investigation. The integrated acceptance matrix is complete ([validation evidence](approval-validation.md)); the spec's deferred expansion branches (takeover, presentation, voice, delegation, generated code) remain future work.
+
+## Input requests (clarification)
+
+A durable execution can also wait for information rather than permission:
+
+```elixir
+{:ok, %{input_request: request}} = Knotra.snapshot(MyApp.Agents, execution_id, host_context)
+
+answer = %{request_id: request.id, version: request.version, answer: "receipt r1"}
+
+{:ok, record} = Knotra.answer(MyApp.Agents, execution_id, definition, fresh_host_context, answer)
+```
+
+A pending interaction is either an approval or an input request, never both. The loop
+asks a question through `{:input, request, next_state}`; the default loop does so for a
+zero-call model reply whose `Knotra.Reply.input_request` is a strictly one-key non-empty
+`%{prompt: binary}`. The public snapshot and the checkpoint add a top-level
+`input_request` field next to `approval` (`nil` when none). Status stays `:waiting` while
+either is pending, so the existing status-based cancel and expiry paths apply unchanged.
+A reply may carry an `input_request` only when it has no tool calls.
+
+Answering an input request uses the same `:answer` host action as an approval.
+`Knotra.Access.authorize(:answer, ...)` must return `{:ok, tenant_id, responder_id}`;
+a missing or malformed responder identity fails closed. The input answer map has exactly
+three keys — `request_id`, `version` and a non-empty binary `answer` — and any other shape
+returns `:invalid_answer`. An input answer binds no operation and never dispatches a tool.
+
+On acceptance the answered record keeps `disposition: :answered`, `answered_version: v`,
+`answer: text`, `responder_id: <host responder>` and `version: v + 1`, appends an
+`:input_answered` event with the answer as top-level `data` (the same shape as
+`:approval_answered`), then continues the same execution through the existing continuation
+path. Prior counters and remaining active allowance are preserved. Identical duplicate
+answers are harmless; a conflicting later answer returns `:answer_conflict`. An answer for
+a superseded request identity or version returns `:stale_input_request`. Expiry writes
+`:expired` / `:input_expired`; cancellation writes `:cancelled` / `:cancelled`; a late answer
+returns `:input_expired` or `:execution_cancelled` and cannot revive the wait.
+
+Recovery merges the saved `input_request`. When it is answered, the runtime appends the
+answer to the last exchange under the extra `:answer` key, calls the model once and lets the
+default loop evaluate the new reply at `:reply`; it does not re-enter the question state, so
+the same question is not asked again. `Knotra.Models.ReqLLM` renders that `:answer` as the
+human turn after the assistant reply it answers. An interrupted post-answer model call
+conservatively blocks (`:blocked` / `:interrupted`) instead of silently re-asking. A changed
+definition version or model checkpoint version blocks as `:incompatible_checkpoint`.
+
+Compatibility: the checkpoint format stays v2. `input_request` is an additive optional key;
+checkpoints without it still restore, and readers from before this vocabulary addition reject
+new records rather than misread them. Do not roll back to an older reader and rewrite records
+to make them resume. Non-durable runs that receive `{:input, ...}` fail closed with
+`:input_not_supported` instead of continuing.
+
+Acceptance mapping for [issue #11](https://github.com/stlucasgarcia/knotra/issues/11), all in
+[durable tests](../test/durable_test.exs) unless noted:
+
+| #11 acceptance criterion | Executable checks |
+|---|---|
+| Durable pending request survives restart with the worker released | `clarification waits durably and resumes the same execution after restart` (restart, same request via `snapshot/3` and `checkpoint/3`, capacity released) |
+| Authorized answer continues the same execution with preserved counters/allowance | same test (`counts: %{turns: 2}`), `a crash after the answer commit resumes exactly once` |
+| Duplicate harmless; stale/cross-tenant/unauthorized/conflicting rejected | `duplicate clarification answers are harmless and conflicting ones are rejected`, `clarification answers enforce tenant, permission, provenance, request id, version and shape` |
+| Expiry/cancellation inspectable; late answers cannot revive | `clarification expiry and cancellation end the wait and late answers cannot revive them` |
+| Conservative interrupted recovery; incompatible checkpoints blocked | `an interrupted clarification continuation blocks instead of silently re-asking`, `incompatible clarification checkpoints block visibly` |
+| Approval records, dispatch admission and responder audit unchanged; input answer never dispatches | entire approval suite; `F.Ledger.entries() == []` in every clarification test |
+| Credentials/private state excluded while continuation is preserved | `clarification state excludes private options and credentials while preserving continuation data` |
+| Deterministic public-interface tests; existing suites green | `test/durable_test.exs`, `test/req_llm_test.exs` (`an answered exchange renders the human answer after the assistant reply`), `test/knotra_test.exs` (non-durable `:input_not_supported`) |
+
+Input-request boundaries: this is one bounded round-trip that continues the same execution; it
+is not an automatic clarification chain, in-place editing, structured UI or voice transport,
+and it grants no operation authority. A question is model text and may be sensitive; the host
+owns its rendering, retention and redaction. Only the default loop and default tool runtime
+support a restart-safe input request.
 
 ## Explicit recovery of uncertain fake effects
 
@@ -151,9 +221,9 @@ The host must authorize `:cancel` for the execution's tenant. This stable-ID ove
 
 Dispatch admission means the committed intent, not the later wall-clock instant of a host effect. If that revision wins first, cancellation returns `:already_admitted` without changing history, killing the effect, or erasing its result. The execution may still complete or become blocked/uncertain. Admission is tracked per operation: a later pending approval can be cancelled even after an earlier effect completed, without erasing that effect's event/ledger history. This is a declined cancellation for an already-admitted current operation, **not** remote rollback. If cancellation wins the conditional write first, no new dispatch can be admitted. Client-provided timestamps do not decide this race.
 
-`response_timeout` sets a wall-clock human-response deadline, separate from the saved active-work allowance. While the request is still pending, authorized `snapshot/3`, `recover/4`, `answer/5`, or `cancel/3` discovers overdue requests and conditionally commits `:expired` / `:approval_expired`. Answer admission and expiry use complementary SQLite time predicates plus the same revision fence. An on-time committed answer consumes the human-response deadline; that deadline does not later expire an approved operation. There is no per-request timer or background sweeper, so an untouched overdue row is materialized as expired on its next lifecycle access—even following a fresh BEAM restart. Private `checkpoint/3` remains a read of the saved checkpoint, not an expiry trigger.
+`response_timeout` sets a wall-clock human-response deadline, separate from the saved active-work allowance. While the request is still pending, authorized `snapshot/3`, `recover/4`, `answer/5`, or `cancel/3` discovers overdue requests and conditionally commits `:expired` / `:approval_expired` (or `:expired` / `:input_expired` for an input request). Answer admission and expiry use complementary SQLite time predicates plus the same revision fence. An on-time committed answer consumes the human-response deadline; that deadline does not later expire an approved operation. There is no per-request timer or background sweeper, so an untouched overdue row is materialized as expired on its next lifecycle access—even following a fresh BEAM restart. Private `checkpoint/3` remains a read of the saved checkpoint, not an expiry trigger.
 
-Expiry preserves consumed counts and remaining active allowance, ends this attempt, and never reproposes or implicitly approves. Late answers return `:approval_expired`. Storage failure returns an error rather than claiming an uncommitted cancellation or expiry. Direct lifecycle transitions are inspectable without replaying observers; a delayed old notification is not authoritative over the current durable record. An uncertain admitted effect can use only the explicit idempotent fake-recovery contract above; other outcomes remain blocked for host investigation.
+Expiry preserves consumed counts and remaining active allowance, ends this attempt, and never reproposes or implicitly approves. Late answers return `:approval_expired` (or `:input_expired`). Storage failure returns an error rather than claiming an uncommitted cancellation or expiry. Direct lifecycle transitions are inspectable without replaying observers; a delayed old notification is not authoritative over the current durable record. An uncertain admitted effect can use only the explicit idempotent fake-recovery contract above; other outcomes remain blocked for host investigation.
 
 ## Verification and SQLite test lifecycle
 

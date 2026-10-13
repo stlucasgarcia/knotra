@@ -4,7 +4,8 @@ An embedded, plugin-driven Elixir agent harness for background work and an opt-i
 
 **Neither path is production-ready.** `start/5` is the milestone-1 in-memory,
 read-only path. [Durable approvals](docs/durable-approvals.md) adds a bounded
-SQLite/fake-operation slice through optional Ecto/Ecto SQL and a host-owned Repo.
+SQLite/fake-operation slice with pending approvals and input requests through
+optional Ecto/Ecto SQL and a host-owned Repo.
 See [ADR 0001](docs/adr/0001-ecto-sqlite-persistence.md) for the approved persistence
 dependency exception; other dependencies still require authorization.
 
@@ -175,8 +176,9 @@ Anthropic, and Gemini, including refusal/incomplete responses, absent usage, and
 text-only multi-turn continuations. Timer-ordering and credential-redaction
 regressions run without provider access. The [durable suite](test/durable_test.exs)
 also covers committed SQLite restart/race scenarios, tenant-scoped submission,
-operation-bound fake approvals, cancellation/expiry, preserved allowances,
-compatible restoration and explicit budgeted idempotent fake-effect recovery; see its [test lifecycle](docs/durable-approvals.md#verification-and-sqlite-test-lifecycle).
+operation-bound fake approvals, restart-safe clarification (pending input
+requests), cancellation/expiry, preserved allowances, compatible restoration and
+explicit budgeted idempotent fake-effect recovery; see its [test lifecycle](docs/durable-approvals.md#verification-and-sqlite-test-lifecycle).
 These tests do not certify production effects or distributed ownership.
 
 For fresh-model evaluation, submit sanitized inputs with a real model plugin and
@@ -188,7 +190,7 @@ not included; see the executable scenario in `test/knotra_test.exs`.
 See [the architecture and future workflow scenarios](ARCHITECTURE.md),
 [the milestone-1 design](docs/design.md), and
 [the historical alternatives research](docs/research/elixir-agent-alternatives.md).
-The opt-in approval subset and its narrow idempotent fake-recovery contract are
-implemented as documented above. Clarification,
-takeover, structured UI, voice, delegation and generated-code branches remain
-design work, not implemented capabilities.
+The opt-in approval subset, the restart-safe clarification (input request)
+slice, and the narrow idempotent fake-recovery contract are implemented as
+documented above. Takeover, structured UI, voice, delegation and generated-code
+branches remain design work, not implemented capabilities.

@@ -94,46 +94,103 @@ defmodule Knotra.Durable do
 
   defp refresh_expiry(config, %{status: "waiting"} = row) do
     with {:ok, snapshot} <- Checkpoint.decode(row.snapshot) do
-      if snapshot.approval.disposition == :pending and
-           snapshot.approval.expires_at <= System.system_time(:millisecond) do
-        case end_waiting(
-               config,
-               row,
-               snapshot,
-               :expired,
-               :approval_expired,
-               {:expired, snapshot.approval.expires_at}
-             ) do
-          {:error, :stale_execution} ->
-            with {:ok, current} <- Persistence.fetch(config.repo, row.tenant, row.id) do
-              if current.revision == row.revision,
-                do: {:ok, current},
-                else: refresh_expiry(config, current)
-            end
+      case interaction(snapshot) do
+        {kind, %{disposition: :pending} = request} ->
+          if request.expires_at <= System.system_time(:millisecond) do
+            {status, reason} =
+              if kind == :approval,
+                do: {:expired, :approval_expired},
+                else: {:expired, :input_expired}
 
-          result ->
-            result
-        end
-      else
-        {:ok, row}
+            case end_waiting(
+                   config,
+                   row,
+                   snapshot,
+                   status,
+                   reason,
+                   {:expired, request.expires_at}
+                 ) do
+              {:error, :stale_execution} ->
+                with {:ok, current} <- Persistence.fetch(config.repo, row.tenant, row.id) do
+                  if current.revision == row.revision,
+                    do: {:ok, current},
+                    else: refresh_expiry(config, current)
+                end
+
+              result ->
+                result
+            end
+          else
+            {:ok, row}
+          end
+
+        _ ->
+          {:ok, row}
       end
     end
   end
 
   defp refresh_expiry(_, row), do: {:ok, row}
 
+  # A pending interaction is either an approval or an input request, never both.
+  # When nothing is pending (decided/ready rows), the interaction answered most
+  # recently is the current one, so an older answered record cannot shadow it.
+  defp interaction(snapshot) do
+    cond do
+      match?(%{input_request: %{disposition: :pending}}, snapshot) ->
+        {:input_request, snapshot.input_request}
+
+      match?(%{approval: %{disposition: :pending}}, snapshot) ->
+        {:approval, snapshot.approval}
+
+      last_answered(snapshot) == :input_answered ->
+        {:input_request, snapshot.input_request}
+
+      last_answered(snapshot) == :approval_answered ->
+        {:approval, snapshot.approval}
+
+      Map.get(snapshot, :input_request) != nil ->
+        {:input_request, snapshot.input_request}
+
+      true ->
+        {:approval, snapshot.approval}
+    end
+  end
+
+  # Public snapshot events are oldest-first; the shared rule takes newest-first.
+  defp last_answered(snapshot),
+    do: Knotra.Execution.last_answered(Enum.reverse(snapshot.events))
+
+  defp answered_event(snapshot, type, data, responder_id) do
+    %{
+      sequence: length(snapshot.events) + 1,
+      elapsed_ms:
+        case List.last(snapshot.events) do
+          nil -> 0
+          event -> event.elapsed_ms
+        end,
+      type: type,
+      responder_id: responder_id,
+      data: data
+    }
+  end
+
   defp end_waiting(config, row, snapshot, status, reason, deadline \\ nil) do
-    approval = %{snapshot.approval | disposition: status, version: snapshot.approval.version + 1}
+    {key, request} = interaction(snapshot)
+    request = %{request | disposition: status, version: request.version + 1}
 
-    approval =
-      if approval[:operation],
-        do: put_in(approval.operation.status, :not_dispatched),
-        else: approval
+    request =
+      if key == :approval and request[:operation],
+        do: put_in(request.operation.status, :not_dispatched),
+        else: request
 
-    updated = %{snapshot | status: status, error: reason, approval: approval}
+    updated =
+      snapshot
+      |> Map.put(key, request)
+      |> Map.merge(%{status: status, error: reason})
 
     with {:ok, checkpoint} <- Checkpoint.decode(row.checkpoint),
-         {:ok, saved} <- Checkpoint.encode(%{checkpoint | approval: approval}),
+         {:ok, saved} <- Checkpoint.encode(Map.put(checkpoint, key, request)),
          {:ok, visible} <- Checkpoint.encode(updated) do
       Persistence.update(
         config.repo,
@@ -150,87 +207,162 @@ defmodule Knotra.Durable do
            {:ok, row} <- Persistence.fetch(config.repo, tenant, id),
            {:ok, row} <- refresh_expiry(config, row),
            {:ok, snapshot} <- Checkpoint.decode(row.snapshot),
-           {:ok, checkpoint} <- compatible_checkpoint(row, definition),
-           :ok <- valid_answer(snapshot, answer),
-           :ok <-
-             if(answer.decision == :reject or is_map(context),
-               do: :ok,
-               else: {:error, :invalid_context}
-             ),
-           :ok <- demonstration(config, definition, snapshot.approval, answer.decision) do
-        if snapshot.approval.disposition != :pending do
-          if row.status == "ready",
-            do: admit_continuation(instance, config, row, definition, context),
-            else: {:ok, snapshot}
-        else
-          approval =
-            snapshot.approval
-            |> Map.put(:answered_version, answer.version)
-            |> Map.put(:decision, answer.decision)
-            |> Map.put(:responder_id, config.responder_id)
-            |> Map.put(:version, answer.version + 1)
-            |> Map.put(
-              :disposition,
-              if(answer.decision == :approve, do: :approved, else: :rejected)
+           {:ok, checkpoint} <- compatible_checkpoint(row, definition) do
+        # The answer shape selects the interaction kind: approvals carry a
+        # decision, input requests carry information. Routing by presence alone
+        # would let an earlier answered input request swallow a later approval.
+        cond do
+          is_map(answer) and Map.has_key?(answer, :decision) ->
+            answer_approval(
+              instance,
+              config,
+              row,
+              snapshot,
+              checkpoint,
+              definition,
+              context,
+              answer
             )
 
-          approval =
-            if answer.decision == :approve,
-              do:
-                Map.put(approval, :operation, %{
-                  id: identity(),
-                  status: :decided,
-                  result: nil,
-                  admitted: false
-                }),
-              else: approval
+          is_map(answer) and Map.has_key?(answer, :answer) ->
+            answer_input(
+              instance,
+              config,
+              row,
+              snapshot,
+              checkpoint,
+              definition,
+              context,
+              answer
+            )
+
+          true ->
+            {:error, :invalid_answer}
+        end
+      end
+    end)
+  end
+
+  # Approval answers bind one unchanged operation and keep their five-key shape.
+  defp answer_approval(instance, config, row, snapshot, checkpoint, definition, context, answer) do
+    with :ok <- valid_answer(snapshot, answer),
+         :ok <-
+           if(answer.decision == :reject or is_map(context),
+             do: :ok,
+             else: {:error, :invalid_context}
+           ),
+         :ok <- demonstration(config, definition, snapshot.approval, answer.decision) do
+      if snapshot.approval.disposition != :pending do
+        if row.status == "ready",
+          do: admit_continuation(instance, config, row, definition, context),
+          else: {:ok, snapshot}
+      else
+        approval =
+          snapshot.approval
+          |> Map.put(:answered_version, answer.version)
+          |> Map.put(:decision, answer.decision)
+          |> Map.put(:responder_id, config.responder_id)
+          |> Map.put(:version, answer.version + 1)
+          |> Map.put(
+            :disposition,
+            if(answer.decision == :approve, do: :approved, else: :rejected)
+          )
+
+        approval =
+          if answer.decision == :approve,
+            do:
+              Map.put(approval, :operation, %{
+                id: identity(),
+                status: :decided,
+                result: nil,
+                admitted: false
+              }),
+            else: approval
+
+        updated = %{
+          snapshot
+          | status: if(answer.decision == :approve, do: :decided, else: :rejected),
+            error: if(answer.decision == :reject, do: :approval_rejected),
+            approval: approval,
+            events:
+              snapshot.events ++
+                [answered_event(snapshot, :approval_answered, answer, config.responder_id)]
+        }
+
+        with {:ok, saved} <- Checkpoint.encode(%{checkpoint | approval: approval}),
+             {:ok, visible} <- Checkpoint.encode(updated),
+             {:ok, decided} <-
+               Persistence.update(
+                 config.repo,
+                 row,
+                 [status: Atom.to_string(updated.status), checkpoint: saved, snapshot: visible],
+                 snapshot.approval.expires_at
+               ) do
+          if answer.decision == :approve do
+            admit_continuation(instance, config, decided, definition, context)
+          else
+            {:ok, updated}
+          end
+        else
+          {:error, :stale_execution} -> answer(instance, row.id, definition, context, answer)
+          error -> error
+        end
+      end
+    else
+      {:duplicate, snapshot} -> {:ok, snapshot}
+      error -> error
+    end
+  end
+
+  # Input answers carry information, never permission, so they never dispatch a
+  # tool. They continue the same execution after the recorded answer.
+  defp answer_input(instance, config, row, snapshot, checkpoint, definition, context, answer) do
+    with :ok <- valid_input_answer(snapshot, answer) do
+      cond do
+        snapshot.input_request.disposition != :pending ->
+          # A stale input answer may only re-admit the input request's own
+          # continuation; it must never start an approved approval's dispatch.
+          if row.status == "ready" and match?({:input_request, _}, interaction(snapshot)),
+            do: admit_continuation(instance, config, row, definition, context),
+            else: {:ok, snapshot}
+
+        true ->
+          request =
+            snapshot.input_request
+            |> Map.put(:answered_version, answer.version)
+            |> Map.put(:answer, answer.answer)
+            |> Map.put(:responder_id, config.responder_id)
+            |> Map.put(:version, answer.version + 1)
+            |> Map.put(:disposition, :answered)
 
           updated = %{
             snapshot
-            | status: if(answer.decision == :approve, do: :decided, else: :rejected),
-              error: if(answer.decision == :reject, do: :approval_rejected),
-              approval: approval,
+            | status: :ready,
+              input_request: request,
               events:
                 snapshot.events ++
-                  [
-                    %{
-                      sequence: length(snapshot.events) + 1,
-                      elapsed_ms:
-                        case List.last(snapshot.events) do
-                          nil -> 0
-                          event -> event.elapsed_ms
-                        end,
-                      type: :approval_answered,
-                      responder_id: config.responder_id,
-                      data: answer
-                    }
-                  ]
+                  [answered_event(snapshot, :input_answered, answer, config.responder_id)]
           }
 
-          with {:ok, saved} <- Checkpoint.encode(%{checkpoint | approval: approval}),
+          with {:ok, saved} <- Checkpoint.encode(Map.put(checkpoint, :input_request, request)),
                {:ok, visible} <- Checkpoint.encode(updated),
                {:ok, decided} <-
                  Persistence.update(
                    config.repo,
                    row,
                    [status: Atom.to_string(updated.status), checkpoint: saved, snapshot: visible],
-                   snapshot.approval.expires_at
+                   snapshot.input_request.expires_at
                  ) do
-            if answer.decision == :approve do
-              admit_continuation(instance, config, decided, definition, context)
-            else
-              {:ok, updated}
-            end
+            admit_continuation(instance, config, decided, definition, context)
           else
-            {:error, :stale_execution} -> answer(instance, id, definition, context, answer)
+            {:error, :stale_execution} -> answer(instance, row.id, definition, context, answer)
             error -> error
           end
-        end
-      else
-        {:duplicate, snapshot} -> {:ok, snapshot}
-        error -> error
       end
-    end)
+    else
+      {:duplicate, snapshot} -> {:ok, snapshot}
+      error -> error
+    end
   end
 
   defp valid_answer(%{status: :cancelled}, _), do: {:error, :execution_cancelled}
@@ -272,6 +404,42 @@ defmodule Knotra.Durable do
   end
 
   defp valid_answer(_, _), do: {:error, :invalid_answer}
+
+  defp valid_input_answer(%{status: :cancelled}, _), do: {:error, :execution_cancelled}
+  defp valid_input_answer(%{status: :expired}, _), do: {:error, :input_expired}
+
+  defp valid_input_answer(
+         %{input_request: request} = snapshot,
+         %{request_id: id, version: version, answer: text} = answer
+       )
+       when is_map(request) and map_size(answer) == 3 and is_integer(version) and version > 0 and
+              is_binary(text) and text != "" do
+    cond do
+      request.id != id ->
+        case Enum.find(
+               snapshot.events,
+               &match?(%{type: :input_answered, data: %{request_id: ^id}}, &1)
+             ) do
+          %{data: ^answer} -> {:duplicate, snapshot}
+          nil -> {:error, :stale_input_request}
+          _ -> {:error, :answer_conflict}
+        end
+
+      Map.get(request, :answered_version, request.version) != version ->
+        {:error, :stale_input_request}
+
+      request.disposition != :pending ->
+        if request[:answer] == text, do: :ok, else: {:error, :answer_conflict}
+
+      snapshot.status != :waiting ->
+        {:error, :not_pending}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp valid_input_answer(_, _), do: {:error, :invalid_answer}
 
   defp demonstration(_config, _definition, _approval, :reject), do: :ok
 
@@ -486,7 +654,8 @@ defmodule Knotra.Durable do
       remaining_ms: remaining,
       active_deadline_at:
         if(state.status == :running, do: System.system_time(:millisecond) + remaining),
-      approval: state.approval
+      approval: state.approval,
+      input_request: state.input_request
     }
 
     with {:ok, saved} <- Checkpoint.encode(checkpoint),
@@ -539,6 +708,18 @@ defmodule Knotra.Durable do
          disposition: :pending
        }}
     end
+  end
+
+  @doc false
+  def input_request(%{prompt: prompt}, response_timeout)
+      when is_binary(prompt) and prompt != "" do
+    %{
+      id: identity(),
+      version: 1,
+      prompt: prompt,
+      disposition: :pending,
+      expires_at: System.system_time(:millisecond) + response_timeout
+    }
   end
 
   def block_failed(state, reason) do
@@ -603,20 +784,24 @@ defmodule Knotra.Durable do
     is_binary(input) and Keyword.keyword?(opts) and is_integer(timeout) and timeout > 0
   end
 
-  defp valid_checkpoint?(row, %{
-         input: input,
-         loop_state: loop,
-         exchanges: exchanges,
-         last: _,
-         stage: stage,
-         approval: _,
-         counts: counts,
-         limits: limits,
-         remaining_ms: remaining,
-         active_deadline_at: deadline,
-         response_timeout: timeout
-       }) do
-    is_binary(input) and is_list(exchanges) and
+  defp valid_checkpoint?(
+         row,
+         %{
+           input: input,
+           loop_state: loop,
+           exchanges: exchanges,
+           last: _,
+           stage: stage,
+           approval: _,
+           counts: counts,
+           limits: limits,
+           remaining_ms: remaining,
+           active_deadline_at: deadline,
+           response_timeout: timeout
+         } = checkpoint
+       ) do
+    valid_input_record(Map.get(checkpoint, :input_request)) and
+      is_binary(input) and is_list(exchanges) and
       ((is_nil(loop) and stage == :setup) or loop in [:model, :reply, {:tools, []}]) and
       is_integer(timeout) and timeout > 0 and
       is_integer(remaining) and remaining >= 0 and remaining <= limits.timeout and
@@ -631,6 +816,29 @@ defmodule Knotra.Durable do
   end
 
   defp valid_checkpoint?(_, _), do: false
+
+  # nil is a valid optional key so approval checkpoints predating input requests
+  # still restore; an answered record additionally carries its answer and responder.
+  defp valid_input_record(nil), do: true
+
+  defp valid_input_record(
+         %{
+           id: id,
+           version: version,
+           prompt: prompt,
+           disposition: disposition,
+           expires_at: expires_at
+         } = request
+       ) do
+    is_binary(id) and id != "" and is_integer(version) and version > 0 and is_binary(prompt) and
+      prompt != "" and disposition in [:pending, :answered, :cancelled, :expired] and
+      is_integer(expires_at) and
+      (disposition != :answered or
+         (is_binary(request[:answer]) and is_binary(request[:responder_id]) and
+            byte_size(request[:responder_id]) in 1..256))
+  end
+
+  defp valid_input_record(_), do: false
 
   defp composition(%Knotra.Definition{} = definition) do
     {model, _} = definition.model

@@ -46,13 +46,21 @@ defmodule Knotra.Models.ReqLLM do
             ReqLLM.Context.tool_result(call.id, call.name, output)
           end)
 
-        case append_exchange(context, exchange.reply, results) do
-          {:ok, next} -> {:cont, {:ok, next}}
+        with {:ok, next} <- append_exchange(context, exchange.reply, results) do
+          {:cont, {:ok, append_answer(next, exchange)}}
+        else
           error -> {:halt, error}
         end
       end)
     end
   end
+
+  # A durable input request renders its answer as the human turn after the
+  # assistant reply it answers, so the resumed model sees the conversation.
+  defp append_answer(context, %{answer: answer}) when is_binary(answer),
+    do: ReqLLM.Context.append(context, ReqLLM.Context.user(answer))
+
+  defp append_answer(context, _exchange), do: context
 
   defp append_exchange(
          context,
