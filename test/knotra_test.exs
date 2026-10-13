@@ -610,4 +610,18 @@ defmodule KnotraTest do
     assert_receive {:DOWN, ^monitor, :process, ^task, _}
     refute_receive {:blocked, _}
   end
+
+  test "a non-durable runtime refuses a model input request instead of continuing", %{auth: auth} do
+    agent =
+      definition(fn _ ->
+        {:ok, %Reply{text: "Which receipt?", input_request: %{prompt: "Which receipt?"}}}
+      end)
+
+    {:ok, execution} = Knotra.start(__MODULE__, agent, "Please confirm receipt r1", auth)
+    record = complete(execution)
+    assert record.status == :failed
+    assert record.error == :input_not_supported
+    refute_receive {:receipt_read, _, _}
+    assert :ok = Knotra.release(execution)
+  end
 end

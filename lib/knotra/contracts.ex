@@ -2,14 +2,19 @@ defmodule Knotra.Reply do
   @moduledoc """
   One model result. `continuation` is adapter-owned state for the next call;
   it is not exposed in execution records. Usage is unknown unless reported.
+  `input_request` is an optional strictly one-key `%{prompt: binary}` map: a
+  non-empty question the execution needs before it can continue. It may accompany
+  only a reply with no tool calls, and it asks for information, never permission
+  to act.
   """
-  defstruct text: "", calls: [], usage: nil, continuation: nil
+  defstruct text: "", calls: [], usage: nil, continuation: nil, input_request: nil
 
   @type t :: %__MODULE__{
           text: String.t(),
           calls: [map()],
           usage: map() | nil,
-          continuation: term()
+          continuation: term(),
+          input_request: %{prompt: String.t()} | nil
         }
 end
 
@@ -17,11 +22,18 @@ defmodule Knotra.Loop do
   @moduledoc """
   A strategy requests operations; it never receives host authorization or credentials.
   `next/2` returns an operation and its next private state, or a final output.
-  Each callback runs in a supervised task under the execution deadline.
+  Each callback runs in a supervised task under the execution deadline. Returning
+  `{:input, request, next_state}` asks the execution for information: the default
+  loop does it for a zero-call model reply carrying an `input_request`, and a
+  non-durable execution fails closed with `:input_not_supported` rather than
+  continuing.
   """
   @callback init(keyword()) :: term()
   @callback next(map(), term()) ::
-              {:model, term()} | {:tool, map(), term()} | {:done, String.t()}
+              {:model, term()}
+              | {:tool, map(), term()}
+              | {:input, map(), term()}
+              | {:done, String.t()}
 end
 
 defmodule Knotra.Model do
@@ -29,6 +41,9 @@ defmodule Knotra.Model do
   One model interaction. The request contains input, completed exchanges and tool
   definitions, but no host authorization context. Return `{:retry, atom}` only
   for a transient failure that may safely repeat; the runtime bounds retries.
+  An exchange may carry an extra `:answer` binary, set when a durable input request
+  is answered; the `Knotra.Models.ReqLLM` adapter renders it as the human turn after
+  the assistant reply it answers.
   """
   @callback call(map(), keyword()) ::
               {:ok, Knotra.Reply.t()} | {:error, atom()} | {:retry, atom()}

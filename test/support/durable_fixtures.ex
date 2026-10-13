@@ -122,6 +122,7 @@ defmodule Knotra.DurableFixtures.StorageGate do
           value when is_binary(value) ->
             case Knotra.Checkpoint.decode(value) do
               {:ok, %{format: 2, approval: %{operation: %{status: ^phase}}}} -> true
+              {:ok, %{format: 2, input_request: %{disposition: ^phase}}} -> true
               _ -> false
             end
 
@@ -240,6 +241,64 @@ defmodule Knotra.DurableFixtures.WeakIdempotentTool do
   defdelegate validate(args), to: Knotra.DurableFixtures.Tool
   defdelegate authorize(args, context), to: Knotra.DurableFixtures.Tool
   defdelegate call(args, context), to: Knotra.DurableFixtures.Tool
+end
+
+defmodule Knotra.DurableFixtures.ClarifyingModel do
+  @behaviour Knotra.Model
+  def checkpoint_version, do: 1
+
+  def call(%{exchanges: [%{answer: answer}]}, opts) do
+    if owner = opts[:owner], do: send(owner, {:clarification_resumed, answer})
+    if opts[:gated], do: receive(do: (:continue -> :ok))
+    {:ok, %Knotra.Reply{text: "Completed: " <> answer}}
+  end
+
+  def call(_request, opts) do
+    request = %{prompt: "Which receipt?"}
+    if owner = opts[:owner], do: send(owner, {:clarification_asked, request})
+
+    {:ok,
+     %Knotra.Reply{
+       text: "Which receipt?",
+       input_request: request,
+       continuation: ReqLLM.Context.assistant("Which receipt?")
+     }}
+  end
+end
+
+defmodule Knotra.DurableFixtures.ClarifyingToolModel do
+  @behaviour Knotra.Model
+  def checkpoint_version, do: 1
+
+  def call(%{exchanges: [%{answer: answer}, %{results: [%{output: "fake effect"}]}]}, opts) do
+    if owner = opts[:owner], do: send(owner, {:clarification_tool_resumed, answer})
+    {:ok, %Knotra.Reply{text: "Completed: " <> answer}}
+  end
+
+  def call(%{exchanges: [%{answer: _answer}]}, _opts) do
+    args = %{"amount" => 12}
+
+    {:ok,
+     %Knotra.Reply{
+       calls: [%{id: "call-1", name: "propose", arguments: args}],
+       continuation:
+         ReqLLM.Context.assistant("",
+           tool_calls: [ReqLLM.ToolCall.new("call-1", "propose", JSON.encode!(args))]
+         )
+     }}
+  end
+
+  def call(_request, opts) do
+    request = %{prompt: "Which receipt?"}
+    if owner = opts[:owner], do: send(owner, {:clarification_asked, request})
+
+    {:ok,
+     %Knotra.Reply{
+       text: "Which receipt?",
+       input_request: request,
+       continuation: ReqLLM.Context.assistant("Which receipt?")
+     }}
+  end
 end
 
 defmodule Knotra.DurableFixtures.Model do
@@ -423,12 +482,27 @@ defmodule Knotra.DurableFixtures do
     }
   end
 
+  def clarifying_definition(opts \\ []) do
+    %Knotra.Definition{
+      version: "clarification-v1",
+      model: {Knotra.DurableFixtures.ClarifyingModel, opts},
+      tools: [Knotra.DurableFixtures.Tool],
+      observer: {Knotra.Observers.Send, opts[:owner]}
+    }
+  end
+
   # Controlled stored deadline: simulate elapsed offline time without sleeping
   # or changing process state. Inputs come from the authorized public interface.
   def expire_deadline(id, snapshot, checkpoint) do
-    snapshot = put_in(snapshot.approval.expires_at, 0)
-    checkpoint = put_in(checkpoint.approval.expires_at, 0)
+    store(id, expire_interaction(snapshot), expire_interaction(checkpoint))
+  end
 
+  # A checkpoint written before input requests existed lacks the additive key.
+  def drop_input_request(id, snapshot, checkpoint) do
+    store(id, Map.delete(snapshot, :input_request), Map.delete(checkpoint, :input_request))
+  end
+
+  defp store(id, snapshot, checkpoint) do
     Ecto.Adapters.SQL.query!(
       Knotra.DurableFixtures.Repo,
       "UPDATE knotra_executions SET snapshot = ?, checkpoint = ?, revision = revision + 1 WHERE id = ?",
@@ -439,6 +513,22 @@ defmodule Knotra.DurableFixtures do
       ],
       log: false
     )
+  end
+
+  defp expire_interaction(record) do
+    cond do
+      match?(%{approval: %{disposition: :pending}}, record) ->
+        put_in(record.approval.expires_at, 0)
+
+      match?(%{input_request: %{disposition: :pending}}, record) ->
+        put_in(record.input_request.expires_at, 0)
+
+      record[:input_request] ->
+        put_in(record.input_request.expires_at, 0)
+
+      true ->
+        put_in(record.approval.expires_at, 0)
+    end
   end
 
   def repo_options(path) do

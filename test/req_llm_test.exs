@@ -328,4 +328,19 @@ defmodule Knotra.Models.ReqLLMTest do
     assert {:ok, %Knotra.Reply{text: "Proposed reply", calls: [], usage: nil}} =
              Adapter.decode(response, [])
   end
+
+  test "an answered exchange renders the human answer after the assistant reply" do
+    assistant = ReqLLM.Context.assistant("Which receipt?")
+
+    exchange = %{
+      reply: %Knotra.Reply{text: "Which receipt?", calls: [], continuation: assistant},
+      results: [],
+      answer: "r1"
+    }
+
+    assert {:ok, context} = Adapter.context(%{input: "Find receipt", exchanges: [exchange]})
+    assert Enum.map(context.messages, & &1.role) == [:user, :assistant, :user]
+    assert Enum.at(context.messages, 1) == assistant
+    assert Enum.at(context.messages, 2) == ReqLLM.Context.user("r1")
+  end
 end

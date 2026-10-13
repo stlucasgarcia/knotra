@@ -77,7 +77,7 @@ execution
 │   ├── model/tool loop [implemented, read-only, non-durable]
 │   └── bounded delegation and swarms [planned]
 ├── human interaction
-│   ├── input request → answer → continue same execution [planned]
+│   ├── input request → answer → continue same execution [implemented, opt-in durable slice]
 │   ├── approval → approve / reject / expire / pre-admission cancel [implemented, opt-in fake-operation slice]
 │   └── takeover → stop new agent operations → explicit handback [planned]
 ├── presentation [planned]
@@ -118,9 +118,9 @@ When model-call capacity or provider quotas are exhausted, work waits in a bound
 
 Before implementing concurrent children, budget reservations and parent/child recovery must prevent simultaneous overspend and duplicate dispatch. A replayed parent must not blindly recreate children. Required-work designation, retry/escalation policy, the exact concurrency target, queue bounds/wait deadlines, fairness algorithm, checkpoint/message formats, message ordering/acknowledgment details and retention policy remain open. Hundreds of simultaneous calls alone do not select multi-node deployment or supersede the SQLite-first decision in ADR 0001; expand infrastructure only against measured constraints.
 
-## 4. Durable interaction lifecycle — implemented approval subset, planned expansion
+## 4. Durable interaction lifecycle — implemented approval/input-request subset, planned expansion
 
-The [opt-in approval contract](docs/durable-approvals.md) implements durable acceptance, waits, answers, pre-admission cancellation, expiry on access, preserved allowances and compatible safe-point restoration. It also supports [explicit idempotent fake-effect recovery](docs/durable-approvals.md#explicit-recovery-of-uncertain-fake-effects), not general interrupted-work replay. Clarification, takeover and distributed ownership remain unimplemented.
+The [opt-in approval contract](docs/durable-approvals.md) implements durable acceptance, waits, answers, pre-admission cancellation, expiry on access, preserved allowances and compatible safe-point restoration. It also supports [explicit idempotent fake-effect recovery](docs/durable-approvals.md#explicit-recovery-of-uncertain-fake-effects), not general interrupted-work replay. [Input requests (clarification)](docs/durable-approvals.md#input-requests-clarification) are now implemented as an opt-in durable slice that continues the same execution after restart. Takeover and distributed ownership remain unimplemented.
 
 The expanded lifecycle below is conceptual, not a list of current Elixir status atoms:
 
@@ -145,7 +145,7 @@ Public snapshots expose inspectable outcomes, not the private state needed to co
 
 ### Answers and authority
 
-On answer, validate authenticated responder permission, tenant, execution, current request version, expiry, and lifecycle. Accept one decision atomically. Duplicate delivery cannot cause another effect; conflicting or stale answers are rejected. Late answers after cancellation, expiry, or supersession cannot revive work. Rehydrate current host authority before resuming.
+On answer, validate authenticated responder permission, tenant, execution, current request version, expiry, and lifecycle. Accept one decision or information answer atomically. Duplicate delivery cannot cause another effect; conflicting or stale answers are rejected. Late answers after cancellation, expiry, or supersession cannot revive work. Rehydrate current host authority before resuming.
 
 Input, approval, rejection, and takeover are distinct:
 
@@ -250,7 +250,7 @@ These observations came from primary documentation/source inspection, not instal
 | ID | Given → intervention → required outcome | Status |
 |---|---|---|
 | F1 | Autonomous parent delegates → children collectively exhaust shared budget or parent is cancelled → no new dispatch or authority escalation; retain already-dispatched outcomes. | Future; concurrent reservation mechanism unresolved. |
-| F2 | Agent needs clarification without connected user → save request, stop/restart host, then answer → same execution resumes with prior counters; waiting occupies no active slot. | Future. |
+| F2 | Agent needs clarification without connected user → save request, stop/restart host, then answer → same execution resumes with prior counters; waiting occupies no active slot. | Partial: the opt-in durable slice records a pending input request, releases the worker, survives restart and resumes the same execution with preserved counters (`clarification waits durably and resumes the same execution after restart` in [durable tests](test/durable_test.exs)). Automatic clarification chains, structured UI and voice transport remain future. |
 | F3 | Operation needs approval → approve, reject, expire, or edit arguments → only the approved unchanged operation may dispatch after fresh authorization; other paths never silently approve. | Partial: approval/rejection/expiry and changed-binding refusal are tested with fake operations; editing/reproposal remains future. |
 | F4 | Crash before pending request commits, after it commits, or after answer commits → recover authoritative state without losing an acknowledged request or executing the decision twice. | Partial: pending/decision commit failures and restart safe points are tested; interrupted decisions conservatively block. Existing in the SQLite slice: [validation evidence](docs/approval-validation.md) maps the crash boundaries; no cross-instance ownership. |
 | F5 | Two devices answer, old answer is replayed, wrong tenant answers, or authority is revoked while waiting → one valid current decision at most; all invalid answers/effects rejected. | Partial: public-interface answer races, stale bindings, tenant checks and revocation are tested; device/channel integration remains future. |

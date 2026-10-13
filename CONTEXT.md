@@ -28,6 +28,7 @@ An ongoing interaction history that may contain multiple executions. Answering a
 
 **Input request**:
 A request for information needed to continue an execution, distinct from permission to perform an action.
+_Also called_: clarification (human-facing name used in docs and tickets).
 
 **Approval request**:
 A request for a human decision on a specific proposed operation and its arguments. Approval does not replace the host application's authorization.

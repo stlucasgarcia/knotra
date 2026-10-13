@@ -32,6 +32,8 @@ defmodule Knotra.Checkpoint do
     temporarily_unavailable answered_version decision responder_id approve reject rejected approval_rejected
     approved operation decided dispatching succeeded result not_dispatched dispatch_not_started
     uncertain_effect approval_mismatch expired approval_expired ready admitted operation_id active_deadline_at approval_answered request_id
+    prompt answer answered input_request input_answered input_expired input_not_supported
+    stale_input_request answer_conflict
   )a
 
   # Only inert data, never functions, processes, ports or references. Do not decode

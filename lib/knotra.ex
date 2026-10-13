@@ -8,11 +8,14 @@ defmodule Knotra do
   needed. Instance capacity includes retained terminal handles. There is no queue,
   deduplication or restart recovery on this path.
 
-  `submit/6` is a separate opt-in Ecto path for durable acceptance and pending
-  approvals. See `docs/durable-approvals.md`. Neither path provides cross-node
-  ownership. `answer/5` can reject a request or approve an explicitly allowlisted
-  demonstration operation. Each subsequent operation needs a fresh approval;
-  this is not production consequential-operation support.
+  `submit/6` is a separate opt-in Ecto path for durable acceptance, pending
+  approvals and pending input requests (clarification). See
+  `docs/durable-approvals.md`. Neither path provides cross-node ownership.
+  `answer/5` can reject an approval request or approve an explicitly allowlisted
+  demonstration operation; it can also answer a pending input request, which only
+  continues the same execution with information and never dispatches an operation.
+  Each subsequent operation needs a fresh approval; this is not production
+  consequential-operation support.
   """
   use Supervisor
 
@@ -79,7 +82,7 @@ defmodule Knotra do
     durable_call(:submit, [instance, definition, input, context, key, opts])
   end
 
-  @doc "Host-authorized durable record lookup; conditionally persists overdue pending approval expiry."
+  @doc "Host-authorized durable record lookup; conditionally persists overdue pending interaction expiry."
   def snapshot(instance, id, context) do
     durable_call(:snapshot, [instance, id, context])
   end
@@ -94,7 +97,7 @@ defmodule Knotra do
     durable_call(:recover, [instance, id, definition, context])
   end
 
-  @doc "Answers one versioned approval; host context and the unchanged operation are required."
+  @doc "Answers one versioned approval or input request; host context and the current request version are required."
   def answer(instance, id, definition, context, answer) do
     durable_call(:answer, [instance, id, definition, context, answer])
   end

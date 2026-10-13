@@ -1577,7 +1577,8 @@ defmodule Knotra.DurableTest do
                :stage,
                :remaining_ms,
                :active_deadline_at,
-               :approval
+               :approval,
+               :input_request
              ])
 
     stop_supervised(__MODULE__)
@@ -2436,5 +2437,446 @@ defmodule Knotra.DurableTest do
 
     assert {:ok, ^before} = Knotra.snapshot(__MODULE__, id, legacy)
     assert F.Ledger.entries() == []
+  end
+
+  defp pending_clarification(key, opts \\ []) do
+    definition = F.clarifying_definition(Keyword.merge([owner: self()], opts))
+    {:ok, id} = Knotra.submit(__MODULE__, definition, "Propose", F.scope(), key)
+    assert_receive {:clarification_asked, request}, 2_000
+    assert request == %{prompt: "Which receipt?"}
+    assert_receive {:knotra, %{id: ^id, status: :waiting, input_request: request}}, 2_000
+    assert request.disposition == :pending
+    assert request.version == 1
+    {id, definition, request}
+  end
+
+  test "clarification waits durably and resumes the same execution after restart", %{path: path} do
+    {id, definition, request} = pending_clarification("clarify-restart")
+    refute_receive {:clarification_resumed, _}
+
+    # The waiting execution released its active slot; a new submission is accepted.
+    assert {:ok, other} =
+             Knotra.submit(
+               __MODULE__,
+               F.definition(owner: self(), gated: true),
+               "Hold",
+               F.scope(),
+               "clarify-blocker"
+             )
+
+    assert other != id
+    assert_receive {:model_called, _}, 2_000
+
+    stop_supervised(__MODULE__)
+    stop_supervised(Repo)
+    start_supervised!({Repo, F.repo_options(path)})
+    start_instance()
+
+    assert {:ok, %{status: :waiting, input_request: ^request}} =
+             Knotra.snapshot(__MODULE__, id, F.scope())
+
+    assert {:ok, checkpoint} = Knotra.checkpoint(__MODULE__, id, F.scope())
+    assert checkpoint.input_request == request
+
+    assert [%{reply: %Knotra.Reply{continuation: %ReqLLM.Message{role: :assistant}}, results: []}] =
+             checkpoint.exchanges
+
+    answer = %{request_id: request.id, version: request.version, answer: "r1"}
+    assert {:ok, _} = Knotra.answer(__MODULE__, id, definition, F.scope(), answer)
+    assert_receive {:clarification_resumed, "r1"}, 2_000
+
+    assert_receive {:knotra,
+                    %{
+                      id: ^id,
+                      status: :completed,
+                      output: "Completed: r1",
+                      counts: %{turns: 2}
+                    }},
+                   2_000
+
+    assert {:ok, %{status: :completed, input_request: answered}} =
+             Knotra.snapshot(__MODULE__, id, F.scope())
+
+    assert answered.disposition == :answered
+    assert answered.answer == "r1"
+    assert answered.responder_id == "fake-approver"
+    assert answered.answered_version == 1
+    assert F.Ledger.entries() == []
+  end
+
+  test "clarification answers enforce tenant, permission, provenance, request id, version and shape" do
+    {id, definition, request} = pending_clarification("clarify-boundaries")
+    answer = %{request_id: request.id, version: request.version, answer: "r1"}
+
+    assert {:error, :not_found} =
+             Knotra.answer(__MODULE__, id, definition, %{F.scope() | tenant: "other"}, answer)
+
+    assert {:error, :forbidden} =
+             Knotra.answer(__MODULE__, id, definition, %{F.scope() | permissions: []}, answer)
+
+    assert {:error, :forbidden} =
+             Knotra.answer(
+               __MODULE__,
+               id,
+               definition,
+               Map.delete(F.scope(), :responder_id),
+               answer
+             )
+
+    for bad <- [%{answer | request_id: "other"}, %{answer | version: 9}] do
+      assert {:error, :stale_input_request} =
+               Knotra.answer(__MODULE__, id, definition, F.scope(), bad)
+    end
+
+    approval_answer = %{
+      request_id: request.id,
+      version: request.version,
+      name: "propose",
+      arguments: %{"amount" => 12},
+      decision: :approve
+    }
+
+    for bad <- [approval_answer, %{answer | answer: ""}, %{answer | answer: 123}] do
+      assert {:error, :invalid_answer} = Knotra.answer(__MODULE__, id, definition, F.scope(), bad)
+    end
+
+    assert {:ok, %{status: :waiting, input_request: %{disposition: :pending}}} =
+             Knotra.snapshot(__MODULE__, id, F.scope())
+
+    assert {:ok, _} = Knotra.answer(__MODULE__, id, definition, F.scope(), answer)
+    assert_receive {:clarification_resumed, "r1"}, 2_000
+    assert F.Ledger.entries() == []
+  end
+
+  test "duplicate clarification answers are harmless and conflicting ones are rejected" do
+    {id, definition, request} = pending_clarification("clarify-duplicates")
+    answer = %{request_id: request.id, version: request.version, answer: "r1"}
+
+    assert {:ok, _} = Knotra.answer(__MODULE__, id, definition, F.scope(), answer)
+    assert_receive {:clarification_resumed, "r1"}, 2_000
+
+    assert_receive {:knotra, %{id: ^id, status: :completed, output: "Completed: r1"}}, 2_000
+
+    assert {:ok, %{status: :completed}} =
+             Knotra.answer(__MODULE__, id, definition, F.scope(), answer)
+
+    refute_receive {:clarification_resumed, _}
+
+    assert {:error, :answer_conflict} =
+             Knotra.answer(__MODULE__, id, definition, F.scope(), %{answer | answer: "r2"})
+
+    refute_receive {:clarification_resumed, _}
+
+    assert {:ok, %{status: :completed, output: "Completed: r1"}} =
+             Knotra.snapshot(__MODULE__, id, F.scope())
+
+    assert F.Ledger.entries() == []
+  end
+
+  test "clarification expiry and cancellation end the wait and late answers cannot revive them" do
+    {id, definition, request} = pending_clarification("clarify-expiry")
+    {:ok, snapshot} = Knotra.snapshot(__MODULE__, id, F.scope())
+    {:ok, checkpoint} = Knotra.checkpoint(__MODULE__, id, F.scope())
+    F.expire_deadline(id, snapshot, checkpoint)
+
+    assert {:ok,
+            %{status: :expired, error: :input_expired, input_request: %{disposition: :expired}}} =
+             Knotra.snapshot(__MODULE__, id, F.scope())
+
+    assert {:error, :input_expired} =
+             Knotra.answer(__MODULE__, id, definition, F.scope(), %{
+               request_id: request.id,
+               version: request.version,
+               answer: "r1"
+             })
+
+    {other, cancelling, other_request} = pending_clarification("clarify-cancel")
+
+    assert {:ok,
+            %{status: :cancelled, error: :cancelled, input_request: %{disposition: :cancelled}}} =
+             Knotra.cancel(__MODULE__, other, F.scope())
+
+    assert {:error, :execution_cancelled} =
+             Knotra.answer(__MODULE__, other, cancelling, F.scope(), %{
+               request_id: other_request.id,
+               version: other_request.version,
+               answer: "r1"
+             })
+
+    refute_receive {:clarification_resumed, _}
+    assert F.Ledger.entries() == []
+  end
+
+  test "a crash after the answer commit resumes exactly once", %{path: path} do
+    {id, definition, request} = pending_clarification("clarify-answer-crash")
+    gate_storage(:answered)
+    answer = %{request_id: request.id, version: request.version, answer: "r1"}
+
+    {caller, monitor} =
+      spawn_monitor(fn -> Knotra.answer(__MODULE__, id, definition, F.scope(), answer) end)
+
+    assert_receive {:storage_returned, :answered, ^caller}, 2_000
+    Process.exit(caller, :kill)
+    assert_receive {:DOWN, ^monitor, :process, ^caller, :killed}
+
+    assert {:ok, %{status: :ready, input_request: %{disposition: :answered, answer: "r1"}}} =
+             Knotra.snapshot(__MODULE__, id, F.scope())
+
+    stop_supervised(__MODULE__)
+    stop_supervised(Repo)
+    start_supervised!({Repo, F.repo_options(path)})
+    start_instance()
+
+    assert {:ok, _} = Knotra.recover(__MODULE__, id, definition, F.scope())
+    assert_receive {:clarification_resumed, "r1"}, 2_000
+
+    assert_receive {:knotra,
+                    %{id: ^id, status: :completed, output: "Completed: r1", counts: %{turns: 2}}},
+                   2_000
+
+    refute_receive {:clarification_asked, _}
+    assert F.Ledger.entries() == []
+  end
+
+  test "an interrupted clarification continuation blocks instead of silently re-asking" do
+    {id, definition, request} = pending_clarification("clarify-interrupted")
+    gated = %{definition | model: {F.ClarifyingModel, owner: self(), gated: true}}
+
+    assert {:ok, _} =
+             Knotra.answer(__MODULE__, id, gated, F.scope(), %{
+               request_id: request.id,
+               version: request.version,
+               answer: "r1"
+             })
+
+    assert_receive {:clarification_resumed, "r1"}, 2_000
+    stop_supervised(__MODULE__)
+    start_instance()
+
+    assert {:ok, %{status: :blocked, error: :interrupted}} =
+             Knotra.recover(__MODULE__, id, definition, F.scope())
+
+    refute_receive {:clarification_asked, _}
+    refute_receive {:clarification_resumed, _}
+    assert F.Ledger.entries() == []
+  end
+
+  test "incompatible clarification checkpoints block visibly" do
+    {id, definition, _request} = pending_clarification("clarify-incompatible")
+
+    assert {:ok, %{status: :blocked, error: :incompatible_checkpoint}} =
+             Knotra.recover(__MODULE__, id, %{definition | version: "changed"}, F.scope())
+
+    assert {:ok, %{status: :blocked}} = Knotra.snapshot(__MODULE__, id, F.scope())
+    refute_receive {:clarification_resumed, _}
+    assert F.Ledger.entries() == []
+  end
+
+  test "clarification state excludes private options and credentials while preserving continuation data" do
+    definition = F.clarifying_definition(owner: self(), private_option: "CLARIFY_PRIVATE_CANARY")
+    context = Map.merge(F.scope(), %{credential: "CLARIFY_AUTH_CANARY", secret: fn -> :ok end})
+    {:ok, id} = Knotra.submit(__MODULE__, definition, "Propose", context, "clarify-canaries")
+    assert_receive {:clarification_asked, _}, 2_000
+    assert_receive {:knotra, %{id: ^id, status: :waiting, input_request: request}}, 2_000
+    {:ok, snapshot} = Knotra.snapshot(__MODULE__, id, F.scope())
+    {:ok, checkpoint} = Knotra.checkpoint(__MODULE__, id, F.scope())
+
+    for canary <- ["CLARIFY_PRIVATE_CANARY", "CLARIFY_AUTH_CANARY"],
+        do: refute(:erlang.term_to_binary({snapshot, checkpoint}) =~ canary)
+
+    assert [%{reply: %{continuation: %ReqLLM.Message{role: :assistant}}} | _] =
+             checkpoint.exchanges
+
+    answer = %{request_id: request.id, version: request.version, answer: "r1"}
+    assert {:ok, _} = Knotra.answer(__MODULE__, id, definition, F.scope(), answer)
+    assert_receive {:clarification_resumed, "r1"}, 2_000
+    assert_receive {:knotra, %{id: ^id, status: :completed}}, 2_000
+
+    {:ok, resumed} = Knotra.checkpoint(__MODULE__, id, F.scope())
+    refute :erlang.term_to_binary(resumed) =~ "CLARIFY_PRIVATE_CANARY"
+
+    assert [%{reply: %{continuation: %ReqLLM.Message{role: :assistant}}}, _] =
+             resumed.exchanges
+
+    assert F.Ledger.entries() == []
+  end
+
+  test "default loop asks for input before completing" do
+    assert {:input, %{prompt: "Which receipt?"}, :reply} =
+             Knotra.Loops.Default.next(
+               %{
+                 last:
+                   {:model,
+                    %{
+                      calls: [],
+                      text: "Which receipt?",
+                      input_request: %{prompt: "Which receipt?"}
+                    }}
+               },
+               :reply
+             )
+
+    assert {:done, "Plain"} =
+             Knotra.Loops.Default.next(%{last: {:model, %{calls: [], text: "Plain"}}}, :reply)
+  end
+
+  test "an answered clarification can lead to an approval that still dispatches" do
+    definition = %{F.definition(owner: self()) | model: {F.ClarifyingToolModel, owner: self()}}
+
+    assert {:ok, id} =
+             Knotra.submit(__MODULE__, definition, "Propose", F.scope(), "clarify-then-approve")
+
+    assert_receive {:clarification_asked, _}, 2_000
+
+    assert_receive {:knotra, %{id: ^id, status: :waiting, input_request: request}}, 2_000
+
+    assert {:ok, _} =
+             Knotra.answer(__MODULE__, id, definition, F.scope(), %{
+               request_id: request.id,
+               version: request.version,
+               answer: "r1"
+             })
+
+    # The answer continues the conversation only; the proposed operation still needs
+    # its own approval even though the answered input request remains recorded.
+    assert_receive {:knotra,
+                    %{
+                      id: ^id,
+                      status: :waiting,
+                      input_request: %{disposition: :answered},
+                      approval: approval
+                    }},
+                   2_000
+
+    assert F.Ledger.entries() == []
+
+    assert {:ok, _} =
+             Knotra.answer(__MODULE__, id, definition, F.scope(), %{
+               request_id: approval.id,
+               version: approval.version,
+               name: approval.name,
+               arguments: approval.arguments,
+               decision: :approve
+             })
+
+    assert_receive {:clarification_tool_resumed, "r1"}, 2_000
+    assert_receive {:knotra, %{id: ^id, status: :completed, output: "Completed: r1"}}, 2_000
+    assert F.Ledger.entries() == [["unexpected effect"]]
+  end
+
+  test "an approval after an answered clarification still expires on the shared deadline" do
+    definition = %{F.definition(owner: self()) | model: {F.ClarifyingToolModel, owner: self()}}
+
+    assert {:ok, id} =
+             Knotra.submit(__MODULE__, definition, "Propose", F.scope(), "clarify-then-expire")
+
+    assert_receive {:clarification_asked, _}, 2_000
+    assert_receive {:knotra, %{id: ^id, status: :waiting, input_request: request}}, 2_000
+
+    assert {:ok, _} =
+             Knotra.answer(__MODULE__, id, definition, F.scope(), %{
+               request_id: request.id,
+               version: request.version,
+               answer: "r1"
+             })
+
+    assert_receive {:knotra, %{id: ^id, status: :waiting, approval: approval}}, 2_000
+    {:ok, snapshot} = Knotra.snapshot(__MODULE__, id, F.scope())
+    {:ok, checkpoint} = Knotra.checkpoint(__MODULE__, id, F.scope())
+    F.expire_deadline(id, snapshot, checkpoint)
+
+    assert {:ok,
+            %{
+              status: :expired,
+              error: :approval_expired,
+              approval: %{disposition: :expired},
+              input_request: %{disposition: :answered}
+            }} = Knotra.snapshot(__MODULE__, id, F.scope())
+
+    assert {:error, :approval_expired} =
+             Knotra.answer(__MODULE__, id, definition, F.scope(), %{
+               request_id: approval.id,
+               version: approval.version,
+               name: approval.name,
+               arguments: approval.arguments,
+               decision: :approve
+             })
+
+    assert F.Ledger.entries() == []
+  end
+
+  test "a stale input answer cannot admit a capacity-waiting approved operation" do
+    definition = %{F.definition(owner: self()) | model: {F.ClarifyingToolModel, owner: self()}}
+
+    assert {:ok, id} =
+             Knotra.submit(__MODULE__, definition, "Propose", F.scope(), "clarify-stale-input")
+
+    assert_receive {:knotra, %{id: ^id, status: :waiting, input_request: request}}, 2_000
+
+    assert {:ok, _} =
+             Knotra.answer(__MODULE__, id, definition, F.scope(), %{
+               request_id: request.id,
+               version: request.version,
+               answer: "r1"
+             })
+
+    assert_receive {:knotra, %{id: ^id, status: :waiting, approval: approval}}, 2_000
+
+    # Occupy the only slot so the approved continuation lands in :ready.
+    {:ok, _} =
+      Knotra.submit(
+        __MODULE__,
+        F.definition(owner: self(), gated: true),
+        "Hold",
+        F.scope(),
+        "stale-blocker"
+      )
+
+    assert_receive {:model_called, _}, 2_000
+
+    assert {:ok, _} =
+             Knotra.answer(__MODULE__, id, definition, F.scope(), %{
+               request_id: approval.id,
+               version: approval.version,
+               name: approval.name,
+               arguments: approval.arguments,
+               decision: :approve
+             })
+
+    assert {:ok, %{status: :ready}} = Knotra.snapshot(__MODULE__, id, F.scope())
+
+    # Free the slot, then re-deliver the answered input request: it must not admit
+    # the approval's dispatch, which only explicit recovery may start.
+    stop_supervised(__MODULE__)
+    start_instance()
+
+    assert {:ok, %{status: :ready}} =
+             Knotra.answer(__MODULE__, id, definition, F.scope(), %{
+               request_id: request.id,
+               version: request.version,
+               answer: "r1"
+             })
+
+    refute_receive {:clarification_tool_resumed, _}
+    assert F.Ledger.entries() == []
+
+    assert {:ok, _} = Knotra.recover(__MODULE__, id, definition, F.scope())
+    assert_receive {:clarification_tool_resumed, "r1"}, 2_000
+    assert_receive {:knotra, %{id: ^id, status: :completed}}, 2_000
+    assert F.Ledger.entries() == [["unexpected effect"]]
+  end
+
+  test "an approval checkpoint without the additive input_request key still restores" do
+    {id, definition, answer} = pending_answer("legacy-checkpoint")
+    {:ok, snapshot} = Knotra.snapshot(__MODULE__, id, F.scope())
+    {:ok, checkpoint} = Knotra.checkpoint(__MODULE__, id, F.scope())
+    F.drop_input_request(id, snapshot, checkpoint)
+
+    assert {:ok, _} = Knotra.answer(__MODULE__, id, definition, F.scope(), answer)
+
+    assert_receive {:knotra, %{id: ^id, status: :completed, output: "Completed: fake effect"}},
+                   2_000
+
+    assert F.Ledger.entries() == [["unexpected effect"]]
   end
 end

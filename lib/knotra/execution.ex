@@ -174,8 +174,8 @@ defmodule Knotra.Execution do
   defp consume({:ok, {:ok, %Knotra.Reply{} = reply}}, %{stage: :model} = state) do
     if valid_reply?(reply, state) and
          (is_nil(state.durable) or length(reply.calls) == 1 or
-            (state.counts.tools > 0 and reply.calls == [])) do
-      visible = Map.take(reply, [:text, :calls, :usage])
+            (reply.calls == [] and zero_call_allowed?(reply, state))) do
+      visible = Map.take(reply, [:text, :calls, :usage, :input_request])
 
       state
       |> Map.merge(%{
@@ -248,6 +248,19 @@ defmodule Knotra.Execution do
 
   defp consume({:ok, {:error, reason}}, state) when is_atom(reason),
     do: finish(state, :failed, reason)
+
+  defp consume({:ok, {:input, request, next}}, %{stage: :loop, durable: durable} = state)
+       when not is_nil(durable) do
+    if valid_input_request?(request) do
+      request = Knotra.Durable.input_request(request, durable.response_timeout)
+      finish(%{state | loop_state: next, input_request: request}, :waiting, nil)
+    else
+      finish(state, :failed, :invalid_plugin_result)
+    end
+  end
+
+  defp consume({:ok, {:input, _request, _next}}, %{stage: :loop} = state),
+    do: finish(state, :failed, :input_not_supported)
 
   defp consume({:ok, {:ok, approval}}, %{stage: :approval} = state) when is_map(approval) do
     approval =
@@ -468,7 +481,9 @@ defmodule Knotra.Execution do
     snapshot = public_record(state)
 
     if state.durable do
-      Map.put(snapshot, :approval, state.approval)
+      snapshot
+      |> Map.put(:approval, state.approval)
+      |> Map.put(:input_request, state.input_request)
     else
       snapshot
     end
@@ -499,10 +514,20 @@ defmodule Knotra.Execution do
   defp proper_list?(value) when is_list(value) and length(value) >= 0, do: true
   defp proper_list?(_), do: false
 
+  # Durable runs resolve one pending call per reply. A zero-call reply is allowed
+  # to ask a new input request or to finish an answered clarification continuation
+  # (which executes no tool) as well as to finish after an effect.
+  defp zero_call_allowed?(reply, state) do
+    state.counts.tools > 0 or reply.input_request != nil or
+      match?(%{disposition: :answered}, state.input_request)
+  end
+
   defp valid_reply?(reply, state) do
     previous_ids = for exchange <- state.exchanges, call <- exchange.reply.calls, do: call.id
 
-    is_binary(reply.text) and (is_nil(reply.usage) or is_map(reply.usage)) and
+    valid_input_request?(reply.input_request) and
+      (reply.input_request == nil or reply.calls == []) and
+      is_binary(reply.text) and (is_nil(reply.usage) or is_map(reply.usage)) and
       proper_list?(reply.calls) and
       Enum.all?(reply.calls, fn
         %{id: id, name: name, arguments: args} ->
@@ -517,8 +542,26 @@ defmodule Knotra.Execution do
       )
   end
 
+  defp valid_input_request?(nil), do: true
+
+  defp valid_input_request?(%{prompt: prompt} = request)
+       when is_binary(prompt) and prompt != "" and map_size(request) == 1,
+       do: true
+
+  defp valid_input_request?(_), do: false
+
+  # state.events is newest-first, so the first answer event is the current one.
+  @doc false
+  def last_answered(events) do
+    Enum.find_value(events, fn
+      %{type: :input_answered} -> :input_answered
+      %{type: :approval_answered} -> :approval_answered
+      _ -> nil
+    end)
+  end
+
   defp initialize(state, durable) do
-    state = Map.merge(state, %{durable: durable, approval: nil})
+    state = Map.merge(state, %{durable: durable, approval: nil, input_request: nil})
 
     state =
       if durable do
@@ -558,7 +601,17 @@ defmodule Knotra.Execution do
 
     state =
       state
-      |> Map.merge(Map.take(saved, [:loop_state, :exchanges, :last, :counts, :limits, :approval]))
+      |> Map.merge(
+        Map.take(saved, [
+          :loop_state,
+          :exchanges,
+          :last,
+          :counts,
+          :limits,
+          :approval,
+          :input_request
+        ])
+      )
       |> Map.merge(%{
         events: Enum.reverse(snapshot.events),
         tool_definitions: tools,
@@ -567,9 +620,30 @@ defmodule Knotra.Execution do
         timer: Process.send_after(self(), :deadline, remaining)
       })
 
-    if state.approval.operation.status == :succeeded,
-      do: advance(state),
-      else: dispatch_approved(state)
+    cond do
+      match?(%{disposition: :answered}, state.input_request) and
+          last_answered(state.events) == :input_answered ->
+        # Resume the same conversation with the human answer and call the model
+        # directly, then let the loop evaluate the new reply at :reply. Entering
+        # the loop at :model would request a second model call and re-ask. The most
+        # recent answer decides: an approval continuation after an earlier
+        # answered clarification must still dispatch its admitted operation.
+        state =
+          state
+          |> Map.put(:loop_state, :reply)
+          |> Map.put(
+            :exchanges,
+            List.update_at(state.exchanges, -1, &Map.put(&1, :answer, state.input_request.answer))
+          )
+
+        operation(state, :model)
+
+      state.approval != nil and state.approval.operation.status == :succeeded ->
+        advance(state)
+
+      true ->
+        dispatch_approved(state)
+    end
   end
 
   defp dispatch_approved(state) do
