@@ -2,7 +2,14 @@ defmodule Knotra.Checkpoint do
   @moduledoc false
   @max_bytes 2_000_000
   def version, do: 2
-  @structs [Knotra.Reply, ReqLLM.Message, ReqLLM.Message.ContentPart, ReqLLM.ToolCall]
+
+  @structs [
+    Knotra.Reply,
+    ReqLLM.Message,
+    ReqLLM.Message.ContentPart,
+    ReqLLM.Message.ReasoningDetails,
+    ReqLLM.ToolCall
+  ]
   # Literal vocabulary is loaded with this module in every fresh VM. Being an
   # existing atom in the writer VM is not proof that a checkpoint is portable.
   # Arbitrary model metadata should use string keys/values, not dynamic atoms.
@@ -34,6 +41,9 @@ defmodule Knotra.Checkpoint do
     uncertain_effect approval_mismatch expired approval_expired ready admitted operation_id active_deadline_at approval_answered request_id
     prompt answer answered input_request input_answered input_expired input_not_supported
     stale_input_request answer_conflict
+    signature encrypted? provider provider_data index cost total tokens images storage reasoning_cost
+    line_items thought_signature google openai anthropic openrouter minimax amazon_bedrock
+    bedrock google_vertex vertex quantity component kind count tool_usage image_usage
   )a
 
   # Only inert data, never functions, processes, ports or references. Do not decode

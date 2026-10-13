@@ -294,6 +294,45 @@ defmodule Knotra.Models.ReqLLMTest do
              wire_call(Map.delete(body, "usageMetadata"), "google:gemini-2.5-flash")
   end
 
+  test "Google thinking continuations and usage costs are checkpoint-portable" do
+    body = %{
+      "candidates" => [
+        %{
+          "content" => %{
+            "role" => "model",
+            "parts" => [
+              %{
+                "text" => "Let me think.",
+                "thought" => true,
+                "thoughtSignature" => "c2ln"
+              },
+              %{"text" => "OK"}
+            ]
+          },
+          "finishReason" => "STOP",
+          "index" => 0
+        }
+      ],
+      "usageMetadata" => %{
+        "promptTokenCount" => 10,
+        "candidatesTokenCount" => 7,
+        "totalTokenCount" => 20,
+        "thoughtsTokenCount" => 3
+      }
+    }
+
+    assert {:ok, %Knotra.Reply{continuation: %ReqLLM.Message{} = message} = reply} =
+             wire_call(body, "google:gemini-2.5-flash")
+
+    assert [%ReqLLM.Message.ReasoningDetails{provider: :google, encrypted?: true}] =
+             message.reasoning_details
+
+    # A durable run checkpoints the reply and its usage; gemini-2.5 thinking
+    # metadata and cost breakdowns must stay portable inert data.
+    assert {:ok, _} = Knotra.Checkpoint.encode(message)
+    assert {:ok, _} = Knotra.Checkpoint.encode(Map.take(reply, [:text, :calls, :usage]))
+  end
+
   test "replacement loop can make a second model turn after a text-only response" do
     start_supervised!({Knotra, name: __MODULE__})
 
