@@ -1991,14 +1991,102 @@ defmodule Knotra.DurableTest do
     assert F.Ledger.entries() == []
   end
 
-  test "SQLite durability fixture uses committed WAL files and separate effect storage" do
-    assert [["wal"]] = Ecto.Adapters.SQL.query!(Repo, "PRAGMA journal_mode", [], log: false).rows
-    assert [[2]] = Ecto.Adapters.SQL.query!(Repo, "PRAGMA synchronous", [], log: false).rows
-    assert [[1]] = Ecto.Adapters.SQL.query!(Repo, "PRAGMA foreign_keys", [], log: false).rows
-    # Exqlite 0.41 installs a cancellation-aware busy handler; PRAGMA reports 0.
-    # Do not overwrite it with PRAGMA busy_timeout. Concurrent submissions above
-    # exercise independent writers using the configured bounded handler.
+  test "SQLite durability fixture asserts effective settings on both repos and the five-second busy bound",
+       %{path: path, ledger_path: ledger_path} do
+    repos = [{Repo, path}, {F.Ledger, ledger_path}]
+
+    for {repo, _path} <- repos do
+      assert [["wal"]] = pragma(repo, "journal_mode")
+      assert [[2]] = pragma(repo, "synchronous")
+      assert [[1]] = pragma(repo, "foreign_keys")
+    end
+
+    # Exqlite 0.41 installs a cancellation-aware busy handler; PRAGMA reports 0,
+    # so the five-second bound is asserted behaviorally instead. Timing bounds
+    # verify settings (ADR 0001 §2); business scenarios assert revisions.
+    # Do not overwrite the handler with PRAGMA busy_timeout.
+    for {repo, db_path} <- repos do
+      create_busy_probe(repo)
+      holder = hold_write_lock(db_path)
+      probe = Task.async(fn -> insert_busy_probe(repo) end)
+
+      # While the raw holder owns the write lock, the probe cannot complete.
+      assert Task.yield(probe, 200) == nil
+      send(holder, :release)
+      assert %{num_rows: 1} = Task.await(probe, 2_000)
+    end
+
+    # A write that outlives the configured five-second timeout must fail rather
+    # than wait forever. One Repo proves the shared handler's bound; the ledger
+    # holds its single connection, so no second pooled connection hides the wait.
+    create_busy_probe(F.Ledger)
+    holder = hold_write_lock(ledger_path)
+    started_at = System.monotonic_time(:millisecond)
+
+    error =
+      assert_raise Exqlite.Error, fn ->
+        insert_busy_probe(F.Ledger)
+      end
+
+    assert error.message =~ "busy"
+    assert System.monotonic_time(:millisecond) - started_at >= 4_500
+    send(holder, :release)
+
     assert F.Ledger.entries() == []
+  end
+
+  test "execution Repo serves two concurrent connections" do
+    parent = self()
+
+    holder =
+      spawn_link(fn ->
+        Repo.checkout(fn ->
+          send(parent, :first_connection_held)
+          receive(do: (:release -> :ok))
+        end)
+      end)
+
+    assert_receive :first_connection_held, 2_000
+    # A second checkout completes only if the configured pool of two is effective.
+    probe = Task.async(fn -> Ecto.Adapters.SQL.query!(Repo, "SELECT 1", [], log: false) end)
+    assert %{rows: [[1]]} = Task.await(probe, 2_000)
+    send(holder, :release)
+  end
+
+  defp pragma(repo, name) do
+    Ecto.Adapters.SQL.query!(repo, "PRAGMA #{name}", [], log: false).rows
+  end
+
+  defp create_busy_probe(repo) do
+    Ecto.Adapters.SQL.query!(
+      repo,
+      "CREATE TABLE IF NOT EXISTS busy_probe (x INTEGER)",
+      [],
+      log: false
+    )
+  end
+
+  defp insert_busy_probe(repo) do
+    Ecto.Adapters.SQL.query!(repo, "INSERT INTO busy_probe VALUES (1)", [], log: false)
+  end
+
+  # An out-of-pool raw connection holds SQLite's write lock until released, so
+  # probe writes must wait instead of racing a timed sleep.
+  defp hold_write_lock(path) do
+    owner = self()
+
+    holder =
+      spawn_link(fn ->
+        {:ok, db} = Exqlite.Sqlite3.open(path)
+        :ok = Exqlite.Sqlite3.execute(db, "BEGIN IMMEDIATE")
+        send(owner, :lock_held)
+        receive(do: (:release -> :ok))
+        :ok = Exqlite.Sqlite3.execute(db, "COMMIT")
+        :ok = Exqlite.Sqlite3.close(db)
+      end)
+
+    assert_receive :lock_held, 2_000
+    holder
   end
 
   test "a gated terminal observer cannot retain the active execution slot" do

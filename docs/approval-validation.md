@@ -1,6 +1,7 @@
 # Restart-safe approval validation
 
-Status: **bounded integration evidence; responder audit implemented**. This is the
+Status: **bounded integration evidence; responder audit implemented; effective
+SQLite settings asserted**. This is the
 evidence for [issue #9](https://github.com/stlucasgarcia/knotra/issues/9), against
 [the parent spec](https://github.com/stlucasgarcia/knotra/issues/2).
 
@@ -32,13 +33,18 @@ new dependency or database schema.
   invocations. The ledger survives independently; cleanup is scenario-owned.
 
 Setup and controls are in [durable tests](../test/durable_test.exs) and
-[the test host](../test/support/durable_fixtures.ex). D:1950, `SQLite durability
-fixture uses committed WAL files and separate effect storage`, asserts effective
-execution-Repo WAL, FULL synchronization and foreign keys only. The busy timeout
-is configured, not asserted there; Exqlite's cancellation-aware handler reports
-zero through `PRAGMA busy_timeout`. Effective ledger PRAGMAs are also not asserted.
-Those configured settings remain unverified by this check. SQLite writer
-serialization is not a PostgreSQL or distributed-ownership proof.
+[the test host](../test/support/durable_fixtures.ex). D:1994, `SQLite durability
+fixture asserts effective settings on both repos and the five-second busy bound`,
+asserts effective execution- and ledger-Repo WAL, FULL synchronization and
+foreign keys. D:2038, `execution Repo serves two concurrent connections`,
+asserts the configured two-connection pool before its concurrent-transition
+scenarios rely on it. Exqlite's cancellation-aware handler reports zero through
+`PRAGMA busy_timeout`, so the configured five-second bound is asserted
+behaviorally instead: a raw out-of-pool holder takes SQLite's write lock, the
+probe write cannot complete on either Repo until release, and the ledger probe
+fails with `Exqlite.Error` when the lock outlives the timeout. Do not replace
+that handler with `PRAGMA busy_timeout`. SQLite writer serialization is not a
+PostgreSQL or distributed-ownership proof.
 
 ## Acceptance matrix
 
@@ -138,9 +144,9 @@ ERL_FLAGS='+S 2:2' MIX_ENV=test mix run --no-start test/support/probe_approval_a
 git diff --check
 ```
 
-- **112 tests PASS**, seed `205230`, 36.8 seconds; the durable suite also passed
-  independently (**80 tests**, seed `803116`). Compilation, formatting and
-  whitespace pass; the responder self-check exits 0 with zero effects.
+- **113 tests PASS**, seed `0`, 29.7 seconds; the durable suite also passed
+  independently (**81 tests**, seed `0`, 42.8 seconds). Compilation, formatting
+  and whitespace pass; the responder self-check exits 0 with zero effects.
 - An earlier follow-up full run passed 109/112: existing offline ReqLLM timing
   checks and a Repo-setup checkout failed. Some isolated retries also failed.
   Local measurements showed CPU saturation and 28–43 runnable processes;
@@ -148,9 +154,9 @@ git diff --check
   passing run does not isolate every intermittent cause or certify reliability.
   No test timeout, pool setting, production code outside this contract or
   unrelated process was changed to obtain the pass.
-- SQLite settings and production/ownership limits remain as disclosed above;
-  this audit fix does not certify the configured-but-unasserted ledger PRAGMAs
-  or effective busy timeout.
+- Effective settings on both Repos, the execution Repo's two-connection pool and
+  the five-second busy handler are asserted behaviorally; production/ownership
+  limits remain as disclosed above.
 
 ## Historical validation at `ede28ef`
 
