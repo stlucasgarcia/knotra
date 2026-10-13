@@ -1991,14 +1991,80 @@ defmodule Knotra.DurableTest do
     assert F.Ledger.entries() == []
   end
 
-  test "SQLite durability fixture uses committed WAL files and separate effect storage" do
+  test "SQLite durability fixture asserts effective settings and bounded busy handling on both repos",
+       %{path: path, ledger_path: ledger_path} do
     assert [["wal"]] = Ecto.Adapters.SQL.query!(Repo, "PRAGMA journal_mode", [], log: false).rows
     assert [[2]] = Ecto.Adapters.SQL.query!(Repo, "PRAGMA synchronous", [], log: false).rows
     assert [[1]] = Ecto.Adapters.SQL.query!(Repo, "PRAGMA foreign_keys", [], log: false).rows
-    # Exqlite 0.41 installs a cancellation-aware busy handler; PRAGMA reports 0.
-    # Do not overwrite it with PRAGMA busy_timeout. Concurrent submissions above
-    # exercise independent writers using the configured bounded handler.
+
+    assert [["wal"]] =
+             Ecto.Adapters.SQL.query!(F.Ledger, "PRAGMA journal_mode", [], log: false).rows
+
+    assert [[2]] =
+             Ecto.Adapters.SQL.query!(F.Ledger, "PRAGMA synchronous", [], log: false).rows
+
+    assert [[1]] =
+             Ecto.Adapters.SQL.query!(F.Ledger, "PRAGMA foreign_keys", [], log: false).rows
+
+    # Exqlite 0.41 installs a cancellation-aware busy handler; PRAGMA reports 0,
+    # so the five-second bound is asserted behaviorally. Do not overwrite the
+    # handler with PRAGMA busy_timeout.
+    for {repo, db_path} <- [{Repo, path}, {F.Ledger, ledger_path}] do
+      create_busy_probe(repo)
+      {ref, held_at} = hold_write_lock(db_path, 300)
+      assert %{num_rows: 1} = insert_busy_probe(repo)
+      assert System.monotonic_time(:millisecond) - held_at >= 300
+      assert_receive {:lock_released, ^ref}, 2_000
+    end
+
+    # A write that outlives the configured five-second timeout must fail rather
+    # than wait forever; the ledger's single connection proves the bound.
+    create_busy_probe(F.Ledger)
+    {ref, held_at} = hold_write_lock(ledger_path, 5_600)
+
+    error =
+      assert_raise Exqlite.Error, fn ->
+        insert_busy_probe(F.Ledger)
+      end
+
+    assert error.message == "Database busy"
+    assert System.monotonic_time(:millisecond) - held_at >= 4_500
+    assert_receive {:lock_released, ^ref}, 2_000
+
     assert F.Ledger.entries() == []
+  end
+
+  defp create_busy_probe(repo) do
+    Ecto.Adapters.SQL.query!(
+      repo,
+      "CREATE TABLE IF NOT EXISTS busy_probe (x INTEGER)",
+      [],
+      log: false
+    )
+  end
+
+  defp insert_busy_probe(repo) do
+    Ecto.Adapters.SQL.query!(repo, "INSERT INTO busy_probe VALUES (1)", [], log: false)
+  end
+
+  # An out-of-pool raw connection holds SQLite's write lock so probes must wait.
+  defp hold_write_lock(path, hold_ms) do
+    owner = self()
+    ref = make_ref()
+
+    spawn_link(fn ->
+      {:ok, db} = Exqlite.Sqlite3.open(path)
+      :ok = Exqlite.Sqlite3.execute(db, "BEGIN IMMEDIATE")
+      held_at = System.monotonic_time(:millisecond)
+      send(owner, {:lock_held, ref, held_at})
+      Process.sleep(hold_ms)
+      :ok = Exqlite.Sqlite3.execute(db, "COMMIT")
+      :ok = Exqlite.Sqlite3.close(db)
+      send(owner, {:lock_released, ref})
+    end)
+
+    assert_receive {:lock_held, ^ref, held_at}, 2_000
+    {ref, held_at}
   end
 
   test "a gated terminal observer cannot retain the active execution slot" do
