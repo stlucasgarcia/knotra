@@ -172,9 +172,10 @@ defmodule Knotra.Execution do
   end
 
   defp consume({:ok, {:ok, %Knotra.Reply{} = reply}}, %{stage: :model} = state) do
+    # Durable runs resolve one pending call per reply, or finish as text-only work
+    # with a zero-call reply.
     if valid_reply?(reply, state) and
-         (is_nil(state.durable) or length(reply.calls) == 1 or
-            (reply.calls == [] and zero_call_allowed?(reply, state))) do
+         (is_nil(state.durable) or length(reply.calls) <= 1) do
       visible = Map.take(reply, [:text, :calls, :usage, :input_request])
 
       state
@@ -513,14 +514,6 @@ defmodule Knotra.Execution do
   # length/1 is a guard BIF: improper tails fail the guard instead of raising.
   defp proper_list?(value) when is_list(value) and length(value) >= 0, do: true
   defp proper_list?(_), do: false
-
-  # Durable runs resolve one pending call per reply. A zero-call reply is allowed
-  # to ask a new input request or to finish an answered clarification continuation
-  # (which executes no tool) as well as to finish after an effect.
-  defp zero_call_allowed?(reply, state) do
-    state.counts.tools > 0 or reply.input_request != nil or
-      match?(%{disposition: :answered}, state.input_request)
-  end
 
   defp valid_reply?(reply, state) do
     previous_ids = for exchange <- state.exchanges, call <- exchange.reply.calls, do: call.id

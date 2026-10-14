@@ -78,6 +78,37 @@ defmodule Knotra.DurableTest do
     assert F.Ledger.entries() == [["unexpected effect"]]
   end
 
+  test "a durable text-only reply completes as work with its output" do
+    definition = F.text_definition(owner: self())
+    {:ok, id} = Knotra.submit(__MODULE__, definition, "Say hello", F.scope(), "text-only")
+
+    assert_receive {:knotra,
+                    %{
+                      id: ^id,
+                      status: :completed,
+                      output: "Text-only answer",
+                      counts: %{turns: 1, tools: 0}
+                    }},
+                   2_000
+  end
+
+  test "a completed text-only run is inspectable after a restart", %{path: path} do
+    definition = F.text_definition(owner: self())
+    {:ok, id} = Knotra.submit(__MODULE__, definition, "Say hello", F.scope(), "text-only-restart")
+    assert_receive {:knotra, %{id: ^id, status: :completed, output: "Text-only answer"}}, 2_000
+
+    stop_supervised(__MODULE__)
+    stop_supervised(Repo)
+    start_supervised!({Repo, F.repo_options(path)})
+    start_instance()
+
+    assert {:ok, %{status: :completed, output: "Text-only answer"}} =
+             Knotra.snapshot(__MODULE__, id, F.scope())
+
+    assert {:ok, %{status: :completed, output: "Text-only answer"}} =
+             Knotra.recover(__MODULE__, id, definition, F.scope())
+  end
+
   test "idempotent recovery reuses identity before effect, after effect and after result commit",
        %{path: path} do
     for phase <- [:dispatching, :effect_recorded, :succeeded] do

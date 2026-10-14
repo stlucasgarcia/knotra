@@ -10,6 +10,9 @@ defmodule KnotraBots.Application do
       {Phoenix.PubSub, name: KnotraBots.PubSub},
       KnotraBots.Repo,
       instance_spec(),
+      {Registry, keys: :unique, name: KnotraBots.ConversationRegistry},
+      {Task.Supervisor, name: KnotraBots.TaskSupervisor},
+      KnotraBots.Conversations,
       KnotraBotsWeb.Endpoint
     ]
 

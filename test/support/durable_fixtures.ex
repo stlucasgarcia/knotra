@@ -377,6 +377,16 @@ defmodule Knotra.DurableFixtures.RepeatingModel do
   end
 end
 
+defmodule Knotra.DurableFixtures.TextModel do
+  @behaviour Knotra.Model
+  def checkpoint_version, do: 1
+
+  def call(_request, opts) do
+    if owner = opts[:owner], do: send(owner, {:text_model_called, self()})
+    {:ok, %Knotra.Reply{text: Keyword.get(opts, :text, "Text-only answer")}}
+  end
+end
+
 defmodule Knotra.DurableFixtures.OpenAIHTTP do
   def run(request) do
     send(Req.Request.get_private(request, :model_owner), {:model_called, self()})
@@ -462,6 +472,15 @@ defmodule Knotra.DurableFixtures do
       version: "approval-v1",
       model: {Knotra.DurableFixtures.Model, opts},
       tools: [Knotra.DurableFixtures.Tool],
+      observer: {Knotra.Observers.Send, opts[:owner]}
+    }
+  end
+
+  def text_definition(opts \\ []) do
+    %Knotra.Definition{
+      version: "text-v1",
+      model: {Knotra.DurableFixtures.TextModel, opts},
+      tools: [],
       observer: {Knotra.Observers.Send, opts[:owner]}
     }
   end
