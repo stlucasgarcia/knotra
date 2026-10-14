@@ -1,0 +1,4 @@
+/_build/
+/deps/
+*.sqlite3*
+.env
