@@ -23,10 +23,16 @@ defmodule KnotraBotsWeb.DashboardLive do
   def mount(_params, _session, socket) do
     if connected?(socket), do: schedule_refresh()
 
+    bots = Bots.list()
+
+    default =
+      if Enum.any?(bots, &(&1.id == "concierge")), do: "concierge", else: default_bot_id(bots)
+
     {:ok,
      socket
      |> assign(:tenant, KnotraBots.tenant())
-     |> assign(:bot, "concierge")
+     |> assign(:bots, bots)
+     |> assign(:bot, default)
      |> assign(:message, "")
      |> assign(:submit_error, nil)
      |> assign(:answer_error, nil)
@@ -35,15 +41,21 @@ defmodule KnotraBotsWeb.DashboardLive do
   end
 
   @impl true
-  def handle_event("submit", %{"bot" => bot, "message" => message}, socket) do
+  def handle_event("submit", %{"bot" => bot_id, "message" => message}, socket) do
     message = String.trim(message)
 
-    case KnotraBots.model_status() do
-      :ok ->
-        submit(socket, bot, message)
+    case Bots.get(bot_id) do
+      nil ->
+        {:noreply, assign(socket, :submit_error, "Unknown bot.")}
 
-      {:error, reason} ->
-        {:noreply, assign(socket, :submit_error, "Model not ready: " <> reason)}
+      bot ->
+        case KnotraBots.model_status(bot.model) do
+          :ok ->
+            submit(socket, bot, message)
+
+          {:error, reason} ->
+            {:noreply, assign(socket, :submit_error, "Model not ready: " <> reason)}
+        end
     end
   end
 
@@ -79,7 +91,7 @@ defmodule KnotraBotsWeb.DashboardLive do
   def handle_event("refresh", _params, socket), do: {:noreply, assign_executions(socket)}
 
   defp submit(socket, bot, message) do
-    definition = Bots.definition(kind(bot), self())
+    definition = Bots.definition(bot, self())
 
     case Knotra.submit(KnotraBots.Instance, definition, message, scope(), submission_key()) do
       {:ok, _id} ->
@@ -112,7 +124,12 @@ defmodule KnotraBotsWeb.DashboardLive do
   defp answer(socket, id, run, answer) do
     case definition_for(run) do
       nil ->
-        {:noreply, assign(socket, :answer_error, "Unknown definition version for this run.")}
+        {:noreply,
+         assign(
+           socket,
+           :answer_error,
+           "The bot for this run was deleted; this pending interaction can no longer be answered."
+         )}
 
       definition ->
         case Knotra.answer(KnotraBots.Instance, id, definition, scope(), answer) do
@@ -126,9 +143,11 @@ defmodule KnotraBotsWeb.DashboardLive do
   end
 
   defp definition_for(%{definition_version: version}) do
-    case Bots.kind_for_version(version) do
-      nil -> nil
-      kind -> Bots.definition(kind, self())
+    with id when is_binary(id) <- Bots.bot_id_for_version(version),
+         %{} = bot <- Bots.get(id) do
+      Bots.definition(bot, self())
+    else
+      _ -> nil
     end
   end
 
@@ -176,8 +195,8 @@ defmodule KnotraBotsWeb.DashboardLive do
 
   defp scope, do: %{tenant: KnotraBots.tenant(), permissions: KnotraBots.permissions()}
 
-  defp kind("assistant"), do: :assistant
-  defp kind(_concierge_or_other), do: :concierge
+  defp default_bot_id([]), do: ""
+  defp default_bot_id([bot | _]), do: bot.id
 
   defp decision("approve"), do: :approve
   defp decision(_reject_or_other), do: :reject
@@ -203,8 +222,9 @@ defmodule KnotraBotsWeb.DashboardLive do
         <label>
           Bot
           <select name="bot">
-            <option value="concierge" selected={@bot == "concierge"}>concierge</option>
-            <option value="assistant" selected={@bot == "assistant"}>assistant</option>
+            <option :for={bot <- @bots} value={bot.id} selected={@bot == bot.id}>
+              {bot.name}
+            </option>
           </select>
         </label>
         <label>

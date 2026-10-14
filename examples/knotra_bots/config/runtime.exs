@@ -16,6 +16,16 @@ end
 database =
   env.("KNOTRA_BOTS_DB", Path.expand("../_build/knotra_bots-#{config_env()}.sqlite3", __DIR__))
 
+# Reset only the example's default test database so `mix test` is deterministic
+# across runs; an explicit KNOTRA_BOTS_DB is left alone.
+if config_env() == :test do
+  default_test_db = Path.expand("../_build/knotra_bots-test.sqlite3", __DIR__)
+
+  if Path.expand(database) == default_test_db do
+    for suffix <- ["", "-shm", "-wal"], do: File.rm(default_test_db <> suffix)
+  end
+end
+
 config :knotra_bots, KnotraBots.Repo,
   database: database,
   pool_size: 5,

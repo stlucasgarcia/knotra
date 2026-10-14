@@ -20,6 +20,11 @@ defmodule KnotraBotsWeb.Layouts do
         </script>
       </head>
       <body>
+        <nav class="nav">
+          <a href="/">Dashboard</a>
+          <a href="/bots">Bots</a>
+          <a href="/conversations">Conversations</a>
+        </nav>
         {@inner_content}
       </body>
     </html>
