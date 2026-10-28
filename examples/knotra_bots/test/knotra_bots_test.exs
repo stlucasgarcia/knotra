@@ -1,20 +1,20 @@
 defmodule KnotraBotsTest do
   @moduledoc """
-  Offline end-to-end tests through the LiveViews. The fake model is configured for
-  the test environment, so no provider key or network access is needed.
+  Offline end-to-end tests through the LiveViews. The fake chat model is
+  configured for the test environment, so no provider key or network access is
+  needed.
 
-  Assertions are scoped to the run/card under test: the shared Repo keeps history
-  across tests, so other cards must not satisfy a wait.
+  Tests share the Repo and the seeded channels, so every assertion scopes to a
+  freshly created channel or agent.
   """
   use ExUnit.Case, async: false
 
   import Phoenix.ConnTest
   import Phoenix.LiveViewTest
 
-  alias KnotraBots.{Bots, Conversation, Conversations}
+  alias KnotraBots.{Agents, Channels, Chat}
 
   @endpoint KnotraBotsWeb.Endpoint
-  @prompt "Which order should I look up?"
 
   setup do
     notices =
@@ -39,487 +39,377 @@ defmodule KnotraBotsTest do
     %{notices: notices}
   end
 
-  test "concierge clarifies, approves a notify and completes with one notice", %{notices: notices} do
-    {:ok, view, _html} = live(build_conn(), "/")
-    id = submit(view, "concierge")
-    answer(view, id)
+  test "a channel message gets an offline agent reply", %{notices: _notices} do
+    agent = agent_fixture(%{"name" => "Echo", "handle" => unique_handle("echo")})
+    channel = channel_fixture([agent])
 
-    await(view, id, &String.contains?(&1, ~s(data-testid="approval")))
-    assert card(view, id) =~ "notify"
+    {:ok, view, _html} = live(build_conn(), "/channels/#{channel.id}")
 
-    view |> element("#execution-#{id} button[phx-value-decision=approve]") |> render_click()
+    submit_message(view, "hello there")
 
-    completed = await(view, id, &String.contains?(&1, "badge-completed"))
-    assert completed =~ "Done. The result was: notice queued: ops"
-    assert completed =~ "input_answered"
-    refute completed =~ @prompt
-    assert_counts(completed, turns: 3, tools: 1, retries: 0, steps: 5)
+    message = await_agent_message(channel.id, &(&1.status == "completed"))
+    assert message.body == "Echo received: hello there"
 
+    html = await_html(view, &String.contains?(&1, "Echo received: hello there"))
+    assert html =~ ~s(data-author="human")
+    assert html =~ "hello there"
+    assert html =~ "data-status=\"completed\""
+  end
+
+  test "a mention routes only to the named agent and no mention uses the default",
+       %{notices: _notices} do
+    alpha = agent_fixture(%{"name" => "Alpha", "handle" => unique_handle("alpha")})
+    beta = agent_fixture(%{"name" => "Beta", "handle" => unique_handle("beta")})
+    channel = channel_fixture([alpha, beta], default: alpha.id)
+
+    {:ok, view, _html} = live(build_conn(), "/channels/#{channel.id}")
+
+    submit_message(view, "@#{beta.handle} ping")
+
+    beta_reply =
+      await_agent_message(channel.id, &(&1.agent_id == beta.id and &1.status == "completed"))
+
+    assert beta_reply.body =~ "Beta received:"
+    refute Enum.any?(agent_messages(channel.id), &(&1.agent_id == alpha.id))
+
+    submit_message(view, "hello default")
+
+    alpha_reply =
+      await_agent_message(channel.id, &(&1.agent_id == alpha.id and &1.status == "completed"))
+
+    assert alpha_reply.body =~ "Alpha received: hello default"
+  end
+
+  test "a concierge handoff becomes a researcher approval and completes inline",
+       %{notices: _notices} do
+    concierge = Agents.get!("concierge")
+    researcher = Agents.get!("researcher")
+    channel = channel_fixture([concierge, researcher], default: concierge.id)
+
+    {:ok, view, _html} = live(build_conn(), "/channels/#{channel.id}")
+
+    submit_message(view, "can you check order ord-1?")
+
+    first =
+      await_agent_message(
+        channel.id,
+        &(&1.agent_id == concierge.id and &1.status == "completed")
+      )
+
+    assert first.body =~ "@researcher"
+
+    research = await_agent_message(channel.id, &(&1.agent_id == researcher.id))
+    assert research.hop == 1
+
+    await_html(view, &String.contains?(&1, ~s(data-testid="approval")))
+
+    view
+    |> element(~s(button[phx-value-id="#{research.id}"][phx-value-decision="approve"]))
+    |> render_click()
+
+    done =
+      await_agent_message(
+        channel.id,
+        &(&1.agent_id == researcher.id and &1.status == "completed")
+      )
+
+    assert done.body =~ "Order ord-1 shipped"
+  end
+
+  test "approving notify writes exactly one fake notice", %{notices: notices} do
+    concierge = Agents.get!("concierge")
+    channel = channel_fixture([concierge], default: concierge.id)
+
+    {:ok, view, _html} = live(build_conn(), "/channels/#{channel.id}")
+
+    submit_message(view, "notify ops that order ord-1 shipped")
+    message = await_agent_message(channel.id, &(&1.status == "waiting"))
+
+    await_html(view, &String.contains?(&1, ~s(data-testid="approval")))
+
+    view
+    |> element(~s(button[phx-value-id="#{message.id}"][phx-value-decision="approve"]))
+    |> render_click()
+
+    done = await_agent_message(channel.id, &(&1.status == "completed"))
+    assert done.body =~ "notice queued: ops"
     assert notice_lines(notices) == ["ops"]
   end
 
-  test "assistant approves a read-only lookup and writes no notice", %{notices: notices} do
-    {:ok, view, _html} = live(build_conn(), "/")
-    id = submit(view, "assistant")
-    answer(view, id)
+  test "rejecting notify records rejection and writes no notice", %{notices: notices} do
+    concierge = Agents.get!("concierge")
+    channel = channel_fixture([concierge], default: concierge.id)
 
-    approval = await(view, id, &String.contains?(&1, ~s(data-testid="approval")))
-    assert approval =~ "lookup"
-    refute approval =~ "notify"
+    {:ok, view, _html} = live(build_conn(), "/channels/#{channel.id}")
 
-    view |> element("#execution-#{id} button[phx-value-decision=approve]") |> render_click()
+    submit_message(view, "notify ops that order ord-1 shipped")
+    message = await_agent_message(channel.id, &(&1.status == "waiting"))
+    await_html(view, &String.contains?(&1, ~s(data-testid="approval")))
 
-    completed = await(view, id, &String.contains?(&1, "badge-completed"))
-    assert completed =~ "Done. The result was: Order ord-1 shipped"
+    view
+    |> element(~s(button[phx-value-id="#{message.id}"][phx-value-decision="reject"]))
+    |> render_click()
+
+    rejected = await_agent_message(channel.id, &(&1.status == "rejected"))
+    assert rejected.body == "Approval rejected."
     assert notice_lines(notices) == []
   end
 
-  test "pending clarification survives an instance restart", %{notices: notices} do
-    {:ok, view, _html} = live(build_conn(), "/")
-    id = submit(view, "concierge")
+  test "a clarification is answered inside the agent message", %{notices: _notices} do
+    assistant = Agents.get!("assistant")
+    channel = channel_fixture([assistant], default: assistant.id)
 
-    # Stop while the run waits for clarification, before answering it.
+    {:ok, view, _html} = live(build_conn(), "/channels/#{channel.id}")
+
+    submit_message(view, "please clarify the request")
+    question = await_agent_message(channel.id, &(&1.status == "waiting"))
+
+    html = await_html(view, &String.contains?(&1, ~s(data-testid="input-request")))
+    assert html =~ "What details should I include?"
+
+    view
+    |> form("#answer-#{question.id}", %{"answer" => "include the order id"})
+    |> render_submit()
+
+    done = await_agent_message(channel.id, &(&1.status == "completed"))
+    assert done.body =~ "include the order id"
+  end
+
+  test "a pending approval survives a Knotra instance restart", %{notices: notices} do
+    concierge = Agents.get!("concierge")
+    channel = channel_fixture([concierge], default: concierge.id)
+
+    {:ok, view, _html} = live(build_conn(), "/channels/#{channel.id}")
+    submit_message(view, "notify ops that order ord-1 shipped")
+    message = await_agent_message(channel.id, &(&1.status == "waiting"))
+    await_html(view, &String.contains?(&1, ~s(data-testid="approval")))
+
     :ok = KnotraBots.stop_instance()
     refute Process.whereis(KnotraBots.Instance)
     {:ok, _pid} = KnotraBots.start_instance()
 
-    {:ok, view2, _html} = live(build_conn(), "/")
-    restored = await(view2, id, &String.contains?(&1, ~s(data-testid="input-request")))
-    assert restored =~ @prompt
+    {:ok, view2, _html} = live(build_conn(), "/channels/#{channel.id}")
+    await_html(view2, &String.contains?(&1, ~s(data-testid="approval")))
 
-    answer(view2, id)
-    await(view2, id, &String.contains?(&1, ~s(data-testid="approval")))
+    view2
+    |> element(~s(button[phx-value-id="#{message.id}"][phx-value-decision="approve"]))
+    |> render_click()
 
-    view2 |> element("#execution-#{id} button[phx-value-decision=approve]") |> render_click()
-
-    completed = await(view2, id, &String.contains?(&1, "badge-completed"))
-    assert completed =~ "Done. The result was: notice queued: ops"
-    # The question is answered exactly once and never re-asked.
-    assert completed =~ "input_answered"
-    refute completed =~ @prompt
-    # Counters accrued before the restart are preserved.
-    assert_counts(completed, turns: 3, tools: 1, retries: 0, steps: 5)
+    done = await_agent_message(channel.id, &(&1.status == "completed"))
+    assert done.body =~ "notice queued: ops"
     assert notice_lines(notices) == ["ops"]
   end
 
-  test "rejecting an approval records rejection and writes no notice", %{notices: notices} do
-    {:ok, view, _html} = live(build_conn(), "/")
-    id = submit(view, "concierge")
-    answer(view, id)
-
-    await(view, id, &String.contains?(&1, ~s(data-testid="approval")))
-    view |> element("#execution-#{id} button[phx-value-decision=reject]") |> render_click()
-
-    rejected = await(view, id, &String.contains?(&1, "badge-rejected"))
-    assert rejected =~ "approval_rejected"
-    assert notice_lines(notices) == []
-  end
-
-  test "GEMINI_API_KEY is forwarded when GOOGLE_API_KEY is empty", %{notices: _notices} do
-    previous_model = Application.get_env(:knotra_bots, :model)
-    previous_google = System.get_env("GOOGLE_API_KEY")
-    previous_gemini = System.get_env("GEMINI_API_KEY")
-
-    on_exit(fn ->
-      Application.put_env(:knotra_bots, :model, previous_model)
-      restore_env("GOOGLE_API_KEY", previous_google)
-      restore_env("GEMINI_API_KEY", previous_gemini)
-    end)
-
-    Application.put_env(:knotra_bots, :model, "google:gemini-2.5-flash")
-    System.put_env("GOOGLE_API_KEY", "")
-    System.put_env("GEMINI_API_KEY", "gemini-test-key")
-
-    assert {KnotraBots.Models.Logged, opts} = KnotraBots.model()
-    assert {Knotra.Models.ReqLLM, inner} = Keyword.fetch!(opts, :plugin)
-    assert inner[:model] == "google:gemini-2.5-flash"
-    assert inner[:options][:api_key] == "gemini-test-key"
-    # The preflight must use the same key resolution, or the selector would hide
-    # a model that would actually succeed.
-    assert KnotraBots.model_status("google:gemini-2.5-flash") == :ok
-  end
-
-  test "the logged wrapper contains plugin exceptions", %{notices: _notices} do
-    request = %{input: "hi", exchanges: [], tools: []}
-
-    log =
-      ExUnit.CaptureLog.capture_log(fn ->
-        assert {:error, :model_error} =
-                 KnotraBots.Models.Logged.call(request,
-                   plugin: {Knotra.Models.ReqLLM, model: nil, options: []}
-                 )
-      end)
-
-    assert log =~ "model plugin raised"
-  end
-
-  test "submit refuses a bot whose model has no resolvable key", %{notices: _notices} do
-    previous_google = System.get_env("GOOGLE_API_KEY")
-    previous_gemini = System.get_env("GEMINI_API_KEY")
-
-    on_exit(fn ->
-      restore_env("GOOGLE_API_KEY", previous_google)
-      restore_env("GEMINI_API_KEY", previous_gemini)
-    end)
-
-    System.delete_env("GOOGLE_API_KEY")
-    System.delete_env("GEMINI_API_KEY")
-
-    bot = bot_fixture(%{"model" => "google:gemini-2.5-flash", "tools" => "lookup"})
-
-    {:ok, view, _html} = live(build_conn(), "/")
-    view |> form("#new-run", %{"bot" => bot.id, "message" => "ord-1"}) |> render_submit()
-    assert render(view) =~ "Model not ready"
-  end
-
-  test "a bot created through the UI is listed and selectable for a single run", %{
-    notices: notices
-  } do
-    name = "Helper #{System.unique_integer([:positive])}"
-
-    {:ok, view, _html} = live(build_conn(), "/bots")
-    render_submit(form(view, "#new-bot", new_bot_params(name, "fake", ["lookup"])))
-    assert render(view) =~ name
-
-    bot = Bots.list() |> Enum.find(&(&1.name == name))
-    assert bot.model == "fake"
-    assert bot.tools == "lookup"
-    assert Bots.tool_modules(bot) == [KnotraBots.Tools.Lookup]
-
-    {:ok, dash, _html} = live(build_conn(), "/")
-    assert render(dash) =~ name
-
-    id = submit(dash, bot.id)
-    answer(dash, id)
-
-    approval = await(dash, id, &String.contains?(&1, ~s(data-testid="approval")))
-    assert approval =~ "lookup"
-    refute approval =~ "notify"
-
-    dash |> element("#execution-#{id} button[phx-value-decision=approve]") |> render_click()
-
-    completed = await(dash, id, &String.contains?(&1, "badge-completed"))
-    assert completed =~ "Done. The result was: Order ord-1 shipped"
-    assert notice_lines(notices) == []
-  end
-
-  test "editing a bot bumps its revision and changes its definition version", %{notices: _notices} do
-    bot = bot_fixture(%{})
-    version_before = Bots.definition(bot, self()).version
-
-    {:ok, view, _html} = live(build_conn(), "/bots")
-    render_submit(form(view, "#bot-" <> bot.id, %{"name" => bot.name <> " v2"}))
-
-    edited = Bots.get!(bot.id)
-    assert edited.revision == bot.revision + 1
-    assert edited.name == bot.name <> " v2"
-
-    version_after = Bots.definition(edited, self()).version
-    assert version_before != version_after
-    assert String.ends_with?(version_after, "-r#{edited.revision}")
-  end
-
-  test "delete removes an unreferenced bot and refuses a referenced one", %{notices: _notices} do
-    lone = bot_fixture(%{})
-    {:ok, view, _html} = live(build_conn(), "/bots")
-
-    render_click(view, "delete", %{"id" => lone.id})
-    assert Bots.get(lone.id) == nil
-
-    referenced = bot_fixture(%{})
-    other = bot_fixture(%{})
-    _conversation = insert_conversation!(referenced, other, unique_topic("Keep"), 2)
-
-    render_click(view, "delete", %{"id" => referenced.id})
-    assert Bots.get(referenced.id) != nil
-    assert render(view) =~ "a conversation references it"
-  end
-
-  test "two fake bots complete an alternating conversation that echoes the transcript", %{
-    notices: _notices
-  } do
-    bot_a = bot_fixture(%{})
-    bot_b = bot_fixture(%{})
-    topic = "Shipping delays #{System.unique_integer([:positive])}"
-
-    {:ok, view, _html} = live(build_conn(), "/conversations")
-
-    render_submit(
-      form(view, "#new-conversation", %{
-        "bot_a_id" => bot_a.id,
-        "bot_b_id" => bot_b.id,
-        "topic" => topic,
-        "rounds" => "4"
+  test "a handoff chain stops after one hop", %{notices: _notices} do
+    alpha =
+      agent_fixture(%{
+        "name" => "Chain Alpha",
+        "handle" => unique_handle("chain-alpha"),
+        "system_prompt" => "For order questions, hand off to PLACEHOLDER."
       })
-    )
 
-    conversation = find_conversation!(topic)
-    assert await_conversation(conversation.id, &(&1.status == "completed")).status == "completed"
+    beta =
+      agent_fixture(%{
+        "name" => "Chain Beta",
+        "handle" => unique_handle("chain-beta"),
+        "system_prompt" => "For order questions, hand off to PLACEHOLDER."
+      })
 
-    turns = Conversations.turns(conversation.id)
-    assert Enum.map(turns, & &1.index) == [0, 1, 2, 3]
-    assert Enum.map(turns, & &1.bot_id) == [bot_a.id, bot_b.id, bot_a.id, bot_b.id]
-    assert Enum.all?(turns, &(&1.status == "completed"))
-    assert Enum.all?(turns, &(&1.execution_id && &1.output not in [nil, ""]))
-    assert output(turns, 1) =~ output(turns, 0)
-    assert output(turns, 3) =~ output(turns, 2)
-  end
+    alpha =
+      Agents.update!(alpha, %{
+        "system_prompt" => String.replace(alpha.system_prompt, "PLACEHOLDER", "@#{beta.handle}")
+      })
 
-  test "a killed conversation runner interrupts and resume completes without duplicating turns",
-       %{notices: _notices} do
-    bot_a = bot_fixture(%{})
-    bot_b = bot_fixture(%{})
-    conversation = new_conversation!(bot_a, bot_b, unique_topic("Budget planning"), 4)
+    beta =
+      Agents.update!(beta, %{
+        "system_prompt" => String.replace(beta.system_prompt, "PLACEHOLDER", "@#{alpha.handle}")
+      })
 
-    await_until(fn -> Conversations.completed_count(conversation.id) >= 1 end)
+    channel = channel_fixture([alpha, beta], default: alpha.id)
+    {:ok, view, _html} = live(build_conn(), "/channels/#{channel.id}")
 
-    runner = Conversations.runner_pid(conversation.id)
-    assert is_pid(runner)
-    Process.exit(runner, :kill)
+    submit_message(view, "order status please")
 
-    assert await_conversation(conversation.id, &(&1.status == "interrupted")).status ==
-             "interrupted"
-
-    before = Conversations.turns(conversation.id)
-    existing = Map.new(before, &{&1.index, &1.execution_id})
-
-    assert :ok = Conversations.resume(conversation.id)
-    assert await_conversation(conversation.id, &(&1.status == "completed")).status == "completed"
-
-    turns = Conversations.turns(conversation.id)
-    assert Enum.map(turns, & &1.index) == [0, 1, 2, 3]
-    assert Enum.all?(turns, &(&1.status == "completed"))
-
-    for turn <- turns, id = existing[turn.index], id != nil do
-      assert turn.execution_id == id
-    end
-  end
-
-  test "resume retries a failed turn with a fresh execution instead of rebinding it",
-       %{notices: _notices} do
-    previous_google = System.get_env("GOOGLE_API_KEY")
-    previous_gemini = System.get_env("GEMINI_API_KEY")
-
-    on_exit(fn ->
-      restore_env("GOOGLE_API_KEY", previous_google)
-      restore_env("GEMINI_API_KEY", previous_gemini)
-    end)
-
-    System.delete_env("GOOGLE_API_KEY")
-    System.delete_env("GEMINI_API_KEY")
-
-    bot_a = bot_fixture(%{"model" => "google:gemini-2.5-flash"})
-    bot_b = bot_fixture(%{})
-    conversation = new_conversation!(bot_a, bot_b, unique_topic("Retry"), 2)
-
-    assert await_conversation(conversation.id, &(&1.status == "interrupted")).status ==
-             "interrupted"
-
-    [failed] = Conversations.turns(conversation.id)
-    assert failed.status == "failed"
-    failed_execution = failed.execution_id
-
-    # Fix the model and resume: the retry must use a fresh execution, not the
-    # deterministic key of the failed attempt.
-    assert {:ok, _} = Bots.update(Bots.get!(bot_a.id), %{"model" => "fake"})
-
-    assert :ok = Conversations.resume(conversation.id)
-    assert await_conversation(conversation.id, &(&1.status == "completed")).status == "completed"
-
-    turns = Conversations.turns(conversation.id)
-    assert Enum.map(turns, & &1.index) == [0, 1]
-    assert Enum.all?(turns, &(&1.status == "completed"))
-    refute Enum.any?(turns, &(&1.execution_id == failed_execution))
-  end
-
-  test "a boot sweep makes runner-less conversations resumable", %{notices: _notices} do
-    bot_a = bot_fixture(%{})
-    bot_b = bot_fixture(%{})
-    stale_running = insert_conversation!(bot_a, bot_b, unique_topic("Sweep"), 2)
-    stale_stopping = insert_conversation!(bot_a, bot_b, unique_topic("Was stopping"), 2)
-    KnotraBots.Repo.update!(Ecto.Changeset.change(stale_stopping, status: "stopping"))
-
-    # Simulate the host restart: no runner survives, the rows are stale.
-    :ok = Supervisor.terminate_child(KnotraBots.Supervisor, KnotraBots.Conversations)
-    {:ok, _pid} = Supervisor.restart_child(KnotraBots.Supervisor, KnotraBots.Conversations)
-
-    assert Conversations.get(stale_running.id).status == "interrupted"
-    assert Conversations.get(stale_stopping.id).status == "stopped"
-
-    assert :ok = Conversations.resume(stale_running.id)
-
-    assert await_conversation(stale_running.id, &(&1.status == "completed")).status ==
-             "completed"
-  end
-
-  test "stop halts before the next turn and leaves no further turns", %{notices: _notices} do
-    bot_a = bot_fixture(%{})
-    bot_b = bot_fixture(%{})
-    conversation = new_conversation!(bot_a, bot_b, unique_topic("Weather"), 4)
-
-    assert :ok = Conversations.stop(conversation.id)
-    assert await_conversation(conversation.id, &(&1.status == "stopped")).status == "stopped"
-
-    completed = Conversations.completed_count(conversation.id)
-    assert completed < 4
+    await_agent_message(channel.id, &(&1.agent_id == alpha.id and &1.status == "completed"))
+    await_agent_message(channel.id, &(&1.agent_id == beta.id and &1.status == "completed"))
 
     Process.sleep(400)
-    assert Conversations.completed_count(conversation.id) == completed
-    assert Conversations.get(conversation.id).status == "stopped"
+
+    messages = agent_messages(channel.id)
+    assert length(messages) == 2
+    assert Enum.map(messages, & &1.hop) == [0, 1]
   end
 
-  test "conversation start refuses an unconfigured model and the bot form rejects an unknown model",
-       %{notices: _notices} do
-    previous_openai = System.get_env("OPENAI_API_KEY")
-    previous_config = Application.get_env(:req_llm, :openai_api_key)
+  test "agents can be created, edited, and deleted only when unreferenced", %{notices: _notices} do
+    {:ok, view, _html} = live(build_conn(), "/agents")
 
-    on_exit(fn ->
-      restore_env("OPENAI_API_KEY", previous_openai)
-      restore_config(:req_llm, :openai_api_key, previous_config)
-    end)
-
-    System.delete_env("OPENAI_API_KEY")
-    Application.delete_env(:req_llm, :openai_api_key)
-
-    assistant = Bots.get!("assistant")
-    unconfigured = bot_fixture(%{"model" => "openai:gpt-4o-mini"})
-    assert {:error, _reason} = KnotraBots.model_status("openai:gpt-4o-mini")
-
-    topic = unique_topic("Nope")
-
-    {:ok, view, _html} = live(build_conn(), "/conversations")
+    name = "Helper #{System.unique_integer([:positive])}"
+    handle = unique_handle("helper")
 
     render_submit(
-      form(view, "#new-conversation", %{
-        "bot_a_id" => assistant.id,
-        "bot_b_id" => unconfigured.id,
-        "topic" => topic,
-        "rounds" => "2"
+      form(view, "#new-agent", %{
+        "name" => name,
+        "handle" => handle,
+        "model" => "fake",
+        "system_prompt" => "You are terse.",
+        "tools" => ["lookup"]
       })
     )
 
-    assert render(view) =~ "Model not ready"
-    refute Enum.any?(Conversations.list(), &(&1.topic == topic))
+    assert render(view) =~ name
+    agent = Agents.list() |> Enum.find(&(&1.name == name))
+    assert agent.handle == handle
+    assert Agents.tool_modules(agent) == [KnotraBots.Tools.Lookup]
 
-    {:ok, bots_view, _html} = live(build_conn(), "/bots")
+    auto_name = "Auto Handle #{System.unique_integer([:positive])}"
 
-    render_submit(bots_view, "create", %{
-      "name" => "Bad #{System.unique_integer([:positive])}",
-      "model" => "not-a-model",
-      "system_prompt" => "",
-      "tools" => ["lookup"]
-    })
+    render_submit(
+      form(view, "#new-agent", %{
+        "name" => auto_name,
+        "handle" => "",
+        "model" => "fake",
+        "system_prompt" => "",
+        "tools" => []
+      })
+    )
 
-    assert render(bots_view) =~ "is not in the model catalog"
+    auto = Agents.list() |> Enum.find(&(&1.name == auto_name))
+    assert auto.handle == KnotraBots.Agent.slug(auto_name)
+
+    render_submit(
+      form(view, "#agent-" <> agent.id, %{
+        "name" => agent.name <> " v2",
+        "handle" => agent.handle,
+        "model" => "fake",
+        "system_prompt" => "You are terse.",
+        "tools" => ["lookup"]
+      })
+    )
+
+    edited = Agents.get!(agent.id)
+    assert edited.name == agent.name <> " v2"
+    assert edited.revision == agent.revision + 1
+
+    _channel = channel_fixture([edited])
+
+    render_click(view, "delete", %{"id" => edited.id})
+    assert render(view) =~ "a channel references it"
+    assert Agents.get(edited.id)
+
+    lone = agent_fixture(%{})
+    render_click(view, "delete", %{"id" => lone.id})
+    assert Agents.get(lone.id) == nil
   end
 
-  defp new_bot_params(name, model, tools) do
-    %{"name" => name, "system_prompt" => "You are terse.", "model" => model, "tools" => tools}
+  test "a channel can be created with a selected agent", %{notices: _notices} do
+    agent = agent_fixture(%{})
+    name = "Team #{System.unique_integer([:positive])}"
+
+    {:ok, view, _html} = live(build_conn(), "/channels")
+
+    render_submit(
+      form(view, "#new-channel", %{
+        "name" => name,
+        "topic" => "talk",
+        "agent_ids" => [agent.id]
+      })
+    )
+
+    channel = Channels.list() |> Enum.find(&(&1.name == name))
+    assert channel
+    assert Enum.map(Channels.agents(channel.id), & &1.id) == [agent.id]
+    assert channel.default_agent_id == agent.id
   end
 
-  defp bot_fixture(attrs) do
+  test "an agent whose model has no key fails visibly instead of starting", %{notices: _notices} do
+    previous_google = System.get_env("GOOGLE_API_KEY")
+    previous_gemini = System.get_env("GEMINI_API_KEY")
+
+    on_exit(fn ->
+      restore_env("GOOGLE_API_KEY", previous_google)
+      restore_env("GEMINI_API_KEY", previous_gemini)
+    end)
+
+    System.delete_env("GOOGLE_API_KEY")
+    System.delete_env("GEMINI_API_KEY")
+
+    agent =
+      agent_fixture(%{
+        "name" => "No Key",
+        "handle" => unique_handle("no-key"),
+        "model" => "google:gemini-2.5-flash"
+      })
+
+    channel = channel_fixture([agent])
+    {:ok, view, _html} = live(build_conn(), "/channels/#{channel.id}")
+
+    submit_message(view, "hello")
+
+    failed = await_agent_message(channel.id, &(&1.status == "failed"))
+    assert failed.body =~ "Model not ready"
+  end
+
+  defp agent_fixture(attrs) do
+    n = System.unique_integer([:positive])
+
     defaults = %{
-      "name" => "Bot #{System.unique_integer([:positive])}",
+      "name" => "Agent #{n}",
+      "handle" => "agent-#{n}",
       "model" => "fake",
       "tools" => "",
       "system_prompt" => ""
     }
 
-    Bots.create!(Map.merge(defaults, attrs))
+    Agents.create!(Map.merge(defaults, attrs))
   end
 
-  defp insert_conversation!(bot_a, bot_b, topic, rounds) do
-    %Conversation{
-      id: "conv-" <> Base.url_encode64(:crypto.strong_rand_bytes(9), padding: false),
-      bot_a_id: bot_a.id,
-      bot_b_id: bot_b.id,
-      topic: topic,
-      rounds: rounds,
-      status: "running"
-    }
-    |> KnotraBots.Repo.insert!()
+  defp channel_fixture(agents, opts \\ []) do
+    n = System.unique_integer([:positive])
+    default = Keyword.get(opts, :default) || hd(agents).id
+
+    {:ok, channel} =
+      Channels.create(%{
+        "name" => "Channel #{n}",
+        "topic" => "test channel",
+        "agent_ids" => Enum.map(agents, & &1.id),
+        "default_agent_id" => default
+      })
+
+    channel
   end
 
-  defp new_conversation!(bot_a, bot_b, topic, rounds) do
-    conversation = insert_conversation!(bot_a, bot_b, topic, rounds)
-    :ok = Conversations.start(conversation.id)
-    conversation
+  defp unique_handle(prefix), do: "#{prefix}-#{System.unique_integer([:positive])}"
+
+  defp submit_message(view, text) do
+    view |> form("#composer", %{"message" => text}) |> render_submit()
   end
 
-  defp find_conversation!(topic) do
-    Conversations.list() |> Enum.find(&(&1.topic == topic)) ||
-      flunk("no conversation for #{topic}")
+  defp agent_messages(channel_id) do
+    Chat.messages(channel_id)
+    |> Enum.filter(&(&1.author_type == "agent"))
   end
 
-  defp unique_topic(label), do: "#{label} #{System.unique_integer([:positive])}"
-
-  defp output(turns, index), do: turns |> Enum.at(index) |> Map.fetch!(:output)
-
-  defp restore_config(app, key, nil), do: Application.delete_env(app, key)
-  defp restore_config(app, key, value), do: Application.put_env(app, key, value)
-
-  defp restore_env(name, nil), do: System.delete_env(name)
-  defp restore_env(name, value), do: System.put_env(name, value)
-
-  defp submit(view, bot) do
-    view |> form("#new-run", %{"bot" => bot, "message" => "ord-1"}) |> render_submit()
-    html = await_html(view, &String.contains?(&1, @prompt))
-    newest_execution_id(html)
-  end
-
-  defp answer(view, id) do
-    render_submit(form(view, "#answer-#{id}", %{"answer" => "ord-1"}))
-  end
-
-  defp newest_execution_id(html) do
-    case Regex.run(~r/data-execution-id="([^"]+)"/, html) do
-      [_, id] -> id
-      _ -> flunk("no run card rendered:\n#{html}")
-    end
-  end
-
-  defp card(view, id), do: view |> render() |> card_html(id)
-
-  defp card_html(html, id) do
-    case Regex.run(~r/<article[^>]*id="execution-#{Regex.escape(id)}".*?<\/article>/s, html) do
-      [card] -> card
-      _ -> ""
-    end
-  end
-
-  defp assert_counts(card, expected) do
-    for {name, value} <- expected do
-      assert card =~ ~r/<dt>#{name}<\/dt>\s*<dd>#{value}<\/dd>/
-    end
-  end
-
-  defp notice_lines(path) do
-    if File.exists?(path), do: File.read!(path) |> String.split("\n", trim: true), else: []
-  end
-
-  # Waits until the specific run card satisfies `fun`, then returns that card.
-  defp await(view, id, fun, timeout \\ 3_000) do
+  defp await_agent_message(channel_id, fun, timeout \\ 5_000) do
     deadline = System.monotonic_time(:millisecond) + timeout
-    do_await(view, id, fun, deadline)
+    do_await_agent_message(channel_id, fun, deadline)
   end
 
-  defp do_await(view, id, fun, deadline) do
-    card = card(view, id)
+  defp do_await_agent_message(channel_id, fun, deadline) do
+    case Enum.find(agent_messages(channel_id), fun) do
+      nil ->
+        if System.monotonic_time(:millisecond) >= deadline do
+          flunk("timed out waiting for an agent message in #{channel_id}")
+        else
+          Process.sleep(25)
+          do_await_agent_message(channel_id, fun, deadline)
+        end
 
-    cond do
-      fun.(card) ->
-        card
-
-      System.monotonic_time(:millisecond) >= deadline ->
-        flunk("timed out waiting for run #{id}; last card:\n#{card}")
-
-      true ->
-        Process.sleep(25)
-        do_await(view, id, fun, deadline)
+      message ->
+        message
     end
   end
 
-  defp await_html(view, fun, timeout \\ 3_000) do
+  defp await_html(view, fun, timeout \\ 5_000) do
     deadline = System.monotonic_time(:millisecond) + timeout
     do_await_html(view, fun, deadline)
   end
@@ -540,43 +430,10 @@ defmodule KnotraBotsTest do
     end
   end
 
-  defp await_conversation(id, fun, timeout \\ 5_000) do
-    deadline = System.monotonic_time(:millisecond) + timeout
-    do_await_conversation(id, fun, deadline)
+  defp notice_lines(path) do
+    if File.exists?(path), do: File.read!(path) |> String.split("\n", trim: true), else: []
   end
 
-  defp do_await_conversation(id, fun, deadline) do
-    conversation = Conversations.get(id)
-
-    cond do
-      conversation && fun.(conversation) ->
-        conversation
-
-      System.monotonic_time(:millisecond) >= deadline ->
-        flunk("timed out waiting for conversation #{id}; last: #{inspect(conversation)}")
-
-      true ->
-        Process.sleep(25)
-        do_await_conversation(id, fun, deadline)
-    end
-  end
-
-  defp await_until(fun, timeout \\ 5_000) do
-    deadline = System.monotonic_time(:millisecond) + timeout
-    do_await_until(fun, deadline)
-  end
-
-  defp do_await_until(fun, deadline) do
-    cond do
-      fun.() ->
-        :ok
-
-      System.monotonic_time(:millisecond) >= deadline ->
-        flunk("timed out waiting for condition")
-
-      true ->
-        Process.sleep(25)
-        do_await_until(fun, deadline)
-    end
-  end
+  defp restore_env(name, nil), do: System.delete_env(name)
+  defp restore_env(name, value), do: System.put_env(name, value)
 end

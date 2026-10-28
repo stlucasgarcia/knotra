@@ -15,9 +15,9 @@ defmodule KnotraBotsWeb.Router do
 
   scope "/", KnotraBotsWeb do
     pipe_through :browser
-    live "/", DashboardLive, :index
-    live "/bots", BotsLive, :index
-    live "/conversations", ConversationsLive, :index
-    live "/conversations/:id", ConversationLive, :show
+    live "/", ChatLive, :index
+    live "/channels", ChannelsLive, :index
+    live "/channels/:id", ChatLive, :show
+    live "/agents", AgentsLive, :index
   end
 end

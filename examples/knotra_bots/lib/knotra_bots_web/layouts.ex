@@ -10,7 +10,7 @@ defmodule KnotraBotsWeb.Layouts do
         <meta charset="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         <meta name="csrf-token" content={Plug.CSRFProtection.get_csrf_token()} />
-        <title>KnotraBots</title>
+        <title>Knotra Chat</title>
         <link rel="stylesheet" href="/assets/css/app.css" />
         <script src="/assets/vendor/phoenix.min.js">
         </script>
@@ -20,11 +20,6 @@ defmodule KnotraBotsWeb.Layouts do
         </script>
       </head>
       <body>
-        <nav class="nav">
-          <a href="/">Dashboard</a>
-          <a href="/bots">Bots</a>
-          <a href="/conversations">Conversations</a>
-        </nav>
         {@inner_content}
       </body>
     </html>

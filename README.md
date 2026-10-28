@@ -201,7 +201,9 @@ See [the architecture and future workflow scenarios](ARCHITECTURE.md),
 [the milestone-1 design](docs/design.md), and
 [the historical alternatives research](docs/research/elixir-agent-alternatives.md).
 The runnable Phoenix LiveView example host lives in
-[`examples/knotra_bots`](examples/knotra_bots).
+[`examples/knotra_bots`](examples/knotra_bots): a minimal agentic chat POC where
+humans and agents share channels, mention each other, and answer inline approval
+or clarification gates.
 The opt-in approval subset, the restart-safe clarification (input request)
 slice, and the narrow idempotent fake-recovery contract are implemented as
 documented above. Takeover, structured UI, voice, delegation and generated-code

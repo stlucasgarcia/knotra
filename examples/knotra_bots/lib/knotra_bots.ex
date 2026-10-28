@@ -2,12 +2,11 @@ defmodule KnotraBots do
   @moduledoc """
   A runnable example host for the Knotra library.
 
-  The host owns its Ecto Repo, migration, tenant authorization and this Phoenix
-  LiveView. It demonstrates durable acceptance, a clarification input request, an
-  operation-bound approval, responder provenance and restart recovery. It also runs
-  two host-defined bots in a bot-to-bot conversation, where every turn is one
-  durable execution. The only effect is a fake append-only notice file; no network
-  messaging happens.
+  The host owns its Ecto Repo, migration, tenant authorization and Phoenix
+  LiveViews. Humans and host-defined agents share channels; each agent reply is
+  one durable execution with an inline clarification or approval gate and a public
+  trace. Agent replies may mention teammates to hand work off. The only effect is
+  a fake append-only notice file; no network messaging happens.
   """
 
   @default_model "google:gemini-2.5-flash"
@@ -38,15 +37,18 @@ defmodule KnotraBots do
   def configured_model, do: Application.get_env(:knotra_bots, :model, @default_model)
 
   @doc """
-  Applies both migrations through the host's own workflow, as ADR 0001 requires,
-  then seeds the default bots. Run it before the server starts:
+  Applies the migrations through the host's own workflow, as ADR 0001 requires,
+  then seeds the starter agents and channels. Run it before the server starts:
 
       mix knotra_bots.migrate
   """
   def migrate! do
     Ecto.Migrator.up(KnotraBots.Repo, 1, Knotra.Persistence.Migration, log: false)
     Ecto.Migrator.up(KnotraBots.Repo, 2, KnotraBots.Persistence.Migration, log: false)
-    KnotraBots.Bots.seed!()
+    Ecto.Migrator.up(KnotraBots.Repo, 3, KnotraBots.Persistence.MigrationV3, log: false)
+    Ecto.Migrator.up(KnotraBots.Repo, 4, KnotraBots.Persistence.MigrationV4, log: false)
+    KnotraBots.Agents.seed!()
+    KnotraBots.Channels.seed!()
   end
 
   @doc """
@@ -59,7 +61,8 @@ defmodule KnotraBots do
   def model do
     case configured_model() do
       "fake" ->
-        {KnotraBots.Models.Fake, []}
+        {KnotraBots.Models.ChatFake,
+         [name: "Check", handle: "check", system_prompt: "Reply with the single word: ok"]}
 
       model ->
         {KnotraBots.Models.Logged,
