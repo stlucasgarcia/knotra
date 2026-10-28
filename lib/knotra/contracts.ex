@@ -48,9 +48,17 @@ defmodule Knotra.Model do
   @callback call(map(), keyword()) ::
               {:ok, Knotra.Reply.t()} | {:error, atom()} | {:retry, atom()}
 
+  @doc """
+  Optional opt-in hook that converts the neutral tool definitions into a
+  provider-specific representation once per execution. Executions cache the result
+  and pass it back as `:prepared_tools` on every request, so adapters do not repeat
+  schema compilation per turn. The value is never checkpointed.
+  """
+  @callback prepare_tools([map()]) :: {:ok, term()} | {:error, atom()}
+
   @doc "Opt-in version of inert reply/continuation data; runtime options are never checkpointed."
   @callback checkpoint_version() :: pos_integer()
-  @optional_callbacks checkpoint_version: 0
+  @optional_callbacks checkpoint_version: 0, prepare_tools: 1
 end
 
 defmodule Knotra.Tool do
@@ -73,6 +81,10 @@ defmodule Knotra.Tool do
   a trusted host contract, not containment or proof of the service's implementation.
   Declaring read-only or allowlisting a module is not a sandbox.
   Results are strings so their representation is explicit at the model boundary.
+  In durable mode, validated arguments are checkpointed as inert data: use
+  binaries, numbers, booleans, `nil`, lists, and maps with string keys. Atoms that
+  are not part of the checkpoint vocabulary make the proposal fail closed with
+  `:unsupported_arguments` instead of being persisted.
   """
   @callback definition() :: map()
   @callback validate(map()) :: {:ok, map()} | {:error, atom()}
@@ -81,9 +93,16 @@ defmodule Knotra.Tool do
 end
 
 defmodule Knotra.ToolRuntime do
-  @moduledoc "Replaceable authorized execution boundary for host tools."
+  @moduledoc """
+  Replaceable authorized execution boundary for host tools. Returning
+  `{:ok, validated_arguments, result}` records the arguments the boundary actually
+  passed to `call/2`; the two-element form keeps the model-requested arguments.
+  """
   @callback execute(map(), [module()], term(), keyword()) ::
-              {:ok, String.t()} | {:error, atom()} | {:retry, atom()}
+              {:ok, String.t()}
+              | {:ok, map(), String.t()}
+              | {:error, atom()}
+              | {:retry, atom()}
 end
 
 defmodule Knotra.Observer do
@@ -112,4 +131,15 @@ defmodule Knotra.Definition do
             tool_runtime: {Knotra.ToolRuntimes.Default, []},
             tools: [],
             observer: {Knotra.Observers.Send, nil}
+
+  @type plugin :: {module(), keyword() | term()}
+
+  @type t :: %__MODULE__{
+          version: String.t(),
+          model: plugin(),
+          loop: plugin(),
+          tool_runtime: plugin(),
+          tools: [module()],
+          observer: plugin()
+        }
 end

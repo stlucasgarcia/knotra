@@ -8,8 +8,12 @@ defmodule Knotra.ToolRuntimes.Default do
 
   @impl true
   def execute(call, tools, auth, _opts) do
-    with {:ok, module, validated} <- prepare(call, tools, auth, false) do
-      module.call(validated, auth)
+    with {:ok, module, validated} <- prepare(call, tools, auth, false),
+         {:ok, output} when is_binary(output) <- module.call(validated, auth) do
+      {:ok, validated, output}
+    else
+      {:ok, _non_binary} -> {:error, :invalid_plugin_result}
+      other -> other
     end
   end
 

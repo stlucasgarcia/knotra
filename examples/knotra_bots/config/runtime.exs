@@ -48,8 +48,18 @@ config :knotra_bots,
 
 port = String.to_integer(env.("KNOTRA_BOTS_PORT", "4000"))
 
+secret = env.("SECRET_KEY_BASE", nil)
+
 secret_key_base =
-  env.("SECRET_KEY_BASE", Base.encode64(:crypto.hash(:sha512, "knotra_bots_dev_secret")))
+  if secret == nil do
+    if config_env() == :prod do
+      raise "SECRET_KEY_BASE must be set in production"
+    else
+      Base.encode64(:crypto.hash(:sha512, "knotra_bots_dev_secret"))
+    end
+  else
+    secret
+  end
 
 config :knotra_bots, KnotraBotsWeb.Endpoint,
   http: [ip: {127, 0, 0, 1}, port: port],

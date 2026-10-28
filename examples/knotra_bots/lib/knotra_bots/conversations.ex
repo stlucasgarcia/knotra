@@ -366,7 +366,11 @@ defmodule KnotraBots.Conversations do
 
   defp definition(conversation, index, bot) do
     %Knotra.Definition{
-      version: "conv-#{conversation.id}-turn-#{index}",
+      # The bot id/revision participate in the pinned version because `model/2`
+      # depends on the bot's model and system prompt. Editing a bot after
+      # submission must surface as `:incompatible_checkpoint`, not silently resume
+      # with the new prompt.
+      version: "conv-#{conversation.id}-turn-#{index}-#{bot.id}-r#{bot.revision}",
       model: model(bot, index),
       # Tool-free by design: durable tools need a human approval, so a relay with
       # tools would stall on the gate. See the module doc and the conversation page.

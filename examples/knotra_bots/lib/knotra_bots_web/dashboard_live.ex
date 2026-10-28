@@ -2,10 +2,9 @@ defmodule KnotraBotsWeb.DashboardLive do
   @moduledoc """
   Live view over the tenant's durable executions.
 
-  Knotra's public API has no list function, so this POC reads `id`/`status` from
-  the host-owned `knotra_executions` table and then calls `Knotra.snapshot/3` per
-  id. A real host would keep its own identity/conversation table instead of
-  reaching into the persistence table.
+  Run details come exclusively from `Knotra.list/3`, the library's tenant-scoped
+  public query. The host keeps its own identity table instead of reaching into
+  Knotra's persistence schema.
 
   Submitted runs use this LiveView as their observer, so progress arrives as
   `{:knotra, snapshot}` messages. A bounded periodic refresh covers runs submitted
@@ -15,7 +14,6 @@ defmodule KnotraBotsWeb.DashboardLive do
   use Phoenix.LiveView
 
   alias KnotraBots.Bots
-  alias KnotraBots.Repo
 
   @refresh_ms 1_000
 
@@ -169,28 +167,12 @@ defmodule KnotraBotsWeb.DashboardLive do
   end
 
   defp list_executions do
-    %{rows: rows} =
-      Ecto.Adapters.SQL.query!(
-        Repo,
-        "SELECT id, status FROM knotra_executions WHERE tenant = ? ORDER BY rowid DESC",
-        [KnotraBots.tenant()],
-        log: false
-      )
-
-    {:ok, Enum.map(rows, fn [id, status] -> inspect_execution(id, status) end)}
-  rescue
-    _ -> {:error, :storage_unavailable}
-  end
-
-  # Public snapshots are the only source of run detail; a stale id or unavailable
-  # runtime renders an error badge instead of crashing the dashboard.
-  defp inspect_execution(id, status) do
-    case Knotra.snapshot(KnotraBots.Instance, id, scope()) do
-      {:ok, snapshot} -> {:ok, snapshot}
-      {:error, reason} -> {:error, id, status, reason}
+    case Knotra.list(KnotraBots.Instance, scope(), limit: 100) do
+      {:ok, snapshots} -> {:ok, Enum.map(snapshots, &{:ok, &1})}
+      {:error, reason} -> {:error, reason}
     end
   rescue
-    _ -> {:error, id, status, :unavailable}
+    _ -> {:error, :storage_unavailable}
   end
 
   defp scope, do: %{tenant: KnotraBots.tenant(), permissions: KnotraBots.permissions()}

@@ -31,17 +31,17 @@ defmodule Knotra.DurableTest do
   end
 
   defp start_instance(options \\ []) do
-    start_supervised!(
-      {Knotra,
-       name: __MODULE__,
-       max_executions: 1,
-       durable:
-         [
-           repo: Repo,
-           access: Knotra.DurableFixtures.Access,
-           demo_tools: [F.Tool, F.IdempotentTool, F.WeakIdempotentTool]
-         ] ++ options}
-    )
+    durable =
+      Keyword.merge(
+        [
+          repo: Repo,
+          access: Knotra.DurableFixtures.Access,
+          demo_tools: [F.Tool, F.IdempotentTool, F.WeakIdempotentTool]
+        ],
+        options
+      )
+
+    start_supervised!({Knotra, name: __MODULE__, max_executions: 1, durable: durable})
   end
 
   test "approval after restart executes one fake effect and continues the saved conversation", %{
@@ -2266,6 +2266,220 @@ defmodule Knotra.DurableTest do
                    2_000
 
     {id, definition, answer, operation_id}
+  end
+
+  test "durable plugin error atoms become stable codes, not blocked records" do
+    definition = F.error_definition(owner: self())
+    assert {:ok, id} = Knotra.submit(__MODULE__, definition, "Propose", F.scope(), "plugin-error")
+
+    assert_receive {:knotra, %{id: ^id, status: :failed, error: :plugin_error} = snapshot}, 2_000
+
+    assert [%{type: :failed, data: %{error: :plugin_error, reason: "rate_limited"}}] =
+             Enum.filter(snapshot.events, &(&1.type == :failed))
+
+    assert {:ok, %{status: :failed, error: :plugin_error}} =
+             Knotra.snapshot(__MODULE__, id, F.scope())
+
+    assert {:ok, checkpoint} = Knotra.checkpoint(__MODULE__, id, F.scope())
+    assert {:ok, _bytes} = Knotra.Checkpoint.encode(checkpoint)
+  end
+
+  test "durable proposals with non-portable validated arguments fail closed" do
+    definition = F.atom_argument_definition(owner: self())
+    assert {:ok, id} = Knotra.submit(__MODULE__, definition, "Propose", F.scope(), "atom-args")
+
+    assert_receive {:knotra, %{id: ^id, status: :failed, error: :unsupported_arguments}}, 2_000
+    assert {:ok, %{approval: nil}} = Knotra.snapshot(__MODULE__, id, F.scope())
+  end
+
+  test "a current clarification stays cancellable after an earlier admitted effect" do
+    approval = %{
+      id: "appr-1",
+      version: 2,
+      call_id: "c1",
+      name: "propose",
+      arguments: %{"amount" => 1},
+      disposition: :approved,
+      expires_at: 0,
+      answered_version: 1,
+      decision: :approve,
+      responder_id: "fake-approver",
+      operation: %{id: "op-1", status: :succeeded, result: "fake effect", admitted: true}
+    }
+
+    request = %{
+      id: "req-1",
+      version: 2,
+      prompt: "Which receipt?",
+      disposition: :answered,
+      expires_at: 9_999_999_999_999,
+      answered_version: 1,
+      answer: "r1",
+      responder_id: "fake-approver"
+    }
+
+    insert_row("row-cancel", "tenant-a", "ready", %{
+      approval: approval,
+      input_request: request
+    })
+
+    assert {:ok, %{status: :cancelled, input_request: %{disposition: :cancelled}}} =
+             Knotra.cancel(__MODULE__, "row-cancel", F.scope())
+  end
+
+  test "list returns tenant-scoped records with status filtering" do
+    insert_row("row-a1", "tenant-a", "completed")
+    insert_row("row-a2", "tenant-a", "failed", %{error: :plugin_error})
+    insert_row("row-b1", "tenant-b", "completed")
+
+    assert {:ok, snapshots} = Knotra.list(__MODULE__, F.scope(), limit: 10)
+    assert snapshots |> Enum.map(& &1.id) |> Enum.sort() == ["row-a1", "row-a2"]
+
+    assert {:ok, [%{id: "row-a1", status: :completed}]} =
+             Knotra.list(__MODULE__, F.scope(), status: :completed, limit: 10)
+
+    assert {:error, :invalid_configuration} = Knotra.list(__MODULE__, F.scope(), status: :nope)
+    assert {:error, :invalid_configuration} = Knotra.list(__MODULE__, F.scope(), unknown: 1)
+
+    assert {:ok, [%{id: "row-b1"}]} =
+             Knotra.list(__MODULE__, %{F.scope() | tenant: "tenant-b"}, limit: 10)
+  end
+
+  test "close deletes terminal records and frees the pending bound" do
+    definition = F.definition(owner: self())
+    assert {:ok, id} = Knotra.submit(__MODULE__, definition, "Propose", F.scope(), "close-wait")
+    assert_receive {:knotra, %{id: ^id, status: :waiting}}, 2_000
+    assert {:error, :not_closeable} = Knotra.close(__MODULE__, id, F.scope())
+    assert {:ok, %{status: :cancelled}} = Knotra.cancel(__MODULE__, id, F.scope())
+    assert :ok = Knotra.close(__MODULE__, id, F.scope())
+    assert {:error, :not_found} = Knotra.snapshot(__MODULE__, id, F.scope())
+
+    stop_supervised(__MODULE__)
+    insert_row("row-blocked", "tenant-a", "blocked", %{error: :plugin_error})
+    start_instance(max_pending: 1)
+
+    assert {:error, :pending_limit} =
+             Knotra.submit(
+               __MODULE__,
+               F.text_definition(owner: self()),
+               "Hi",
+               F.scope(),
+               "over-bound"
+             )
+
+    assert :ok = Knotra.close(__MODULE__, "row-blocked", F.scope())
+
+    assert {:ok, _} =
+             Knotra.submit(
+               __MODULE__,
+               F.text_definition(owner: self()),
+               "Hi",
+               F.scope(),
+               "under-bound"
+             )
+  end
+
+  test "accepted records expose the additive input_request key" do
+    holder = F.definition(owner: self(), gated: true)
+    assert {:ok, _} = Knotra.submit(__MODULE__, holder, "Propose", F.scope(), "slot-holder")
+    assert_receive {:model_called, _}, 2_000
+
+    assert {:ok, id} =
+             Knotra.submit(
+               __MODULE__,
+               F.text_definition(owner: self()),
+               "Hi",
+               F.scope(),
+               "accepted-shape"
+             )
+
+    assert {:ok, %{status: :accepted, approval: nil, input_request: nil}} =
+             Knotra.snapshot(__MODULE__, id, F.scope())
+  end
+
+  test "a duplicate approval answer stays harmless after allowlisting is removed" do
+    definition = F.definition(owner: self())
+    assert {:ok, id} = Knotra.submit(__MODULE__, definition, "Propose", F.scope(), "dupe-approve")
+    assert_receive {:knotra, %{id: ^id, status: :waiting, approval: approval}}, 2_000
+
+    answer = %{
+      request_id: approval.id,
+      version: approval.version,
+      name: approval.name,
+      arguments: approval.arguments,
+      decision: :approve
+    }
+
+    assert {:ok, _} = Knotra.answer(__MODULE__, id, definition, F.scope(), answer)
+    assert_receive {:knotra, %{id: ^id, status: :completed}}, 2_000
+
+    stop_supervised(__MODULE__)
+    start_instance(demo_tools: [])
+
+    assert {:ok, %{status: :completed}} =
+             Knotra.answer(__MODULE__, id, definition, F.scope(), answer)
+  end
+
+  defp insert_row(id, tenant, status, overrides \\ %{}) do
+    counts = %{turns: 0, tools: 0, retries: 0, steps: 0}
+
+    snapshot =
+      Map.merge(
+        %{
+          id: id,
+          definition_version: "manual",
+          status: String.to_atom(status),
+          output: nil,
+          error: nil,
+          counts: counts,
+          events: [],
+          observation_error: nil,
+          approval: nil,
+          input_request: nil
+        },
+        overrides
+      )
+
+    checkpoint = %{
+      format: 2,
+      response_timeout: 86_400_000,
+      input: "manual",
+      loop_state: :reply,
+      exchanges: [],
+      last: nil,
+      counts: counts,
+      limits: %{max_turns: 8, max_tool_calls: 16, max_retries: 0, max_steps: 64, timeout: 30_000},
+      stage: :observation,
+      remaining_ms: 10_000,
+      active_deadline_at: nil,
+      approval: snapshot.approval,
+      input_request: snapshot.input_request
+    }
+
+    {:ok, snapshot_bytes} = Knotra.Checkpoint.encode(snapshot)
+    {:ok, checkpoint_bytes} = Knotra.Checkpoint.encode(checkpoint)
+
+    {:ok, _row} =
+      Knotra.Persistence.accept(Repo, %{
+        id: id,
+        tenant: tenant,
+        submission_key: "manual-#{id}",
+        request_hash: :crypto.hash(:sha256, id),
+        composition: :crypto.hash(:sha256, "manual"),
+        checkpoint: checkpoint_bytes,
+        snapshot: snapshot_bytes
+      })
+
+    {:ok, row} = Knotra.Persistence.fetch(Repo, tenant, id)
+
+    {:ok, _row} =
+      Knotra.Persistence.update(Repo, row,
+        status: status,
+        checkpoint: checkpoint_bytes,
+        snapshot: snapshot_bytes
+      )
+
+    :ok
   end
 
   defp pending_answer(key, opts \\ [], tool \\ F.Tool) do

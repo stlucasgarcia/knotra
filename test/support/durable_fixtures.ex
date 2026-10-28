@@ -377,6 +377,44 @@ defmodule Knotra.DurableFixtures.RepeatingModel do
   end
 end
 
+defmodule Knotra.DurableFixtures.ErrorModel do
+  @behaviour Knotra.Model
+  @impl true
+  def checkpoint_version, do: 1
+
+  @impl true
+  def call(_request, opts), do: {:error, Keyword.get(opts, :error, :rate_limited)}
+end
+
+defmodule Knotra.DurableFixtures.AtomArgumentTool do
+  @behaviour Knotra.Tool
+
+  @impl true
+  def definition do
+    %{
+      name: "propose",
+      description: "Validator that normalizes into non-portable data",
+      read_only: false,
+      parameters: %{
+        "type" => "object",
+        "properties" => %{"amount" => %{"type" => "integer"}}
+      }
+    }
+  end
+
+  @impl true
+  def validate(%{"amount" => amount} = args) when is_integer(amount),
+    do: {:ok, Map.put(args, "unit", :usd)}
+
+  def validate(_args), do: {:error, :invalid_arguments}
+
+  @impl true
+  def authorize(_args, _context), do: :ok
+
+  @impl true
+  def call(_args, _context), do: {:ok, "unexpected"}
+end
+
 defmodule Knotra.DurableFixtures.TextModel do
   @behaviour Knotra.Model
   def checkpoint_version, do: 1
@@ -464,7 +502,7 @@ defmodule Knotra.DurableFixtures do
     do: %{
       tenant: "tenant-a",
       responder_id: "fake-approver",
-      permissions: [:submit, :inspect, :recover, :checkpoint, :answer, :cancel]
+      permissions: [:submit, :inspect, :list, :recover, :checkpoint, :answer, :cancel, :close]
     }
 
   def definition(opts \\ []) do
@@ -506,6 +544,24 @@ defmodule Knotra.DurableFixtures do
       version: "clarification-v1",
       model: {Knotra.DurableFixtures.ClarifyingModel, opts},
       tools: [Knotra.DurableFixtures.Tool],
+      observer: {Knotra.Observers.Send, opts[:owner]}
+    }
+  end
+
+  def error_definition(opts \\ []) do
+    %Knotra.Definition{
+      version: "error-v1",
+      model: {Knotra.DurableFixtures.ErrorModel, opts},
+      tools: [],
+      observer: {Knotra.Observers.Send, opts[:owner]}
+    }
+  end
+
+  def atom_argument_definition(opts \\ []) do
+    %Knotra.Definition{
+      version: "atom-arguments-v1",
+      model: {Knotra.DurableFixtures.Model, opts},
+      tools: [Knotra.DurableFixtures.AtomArgumentTool],
       observer: {Knotra.Observers.Send, opts[:owner]}
     }
   end

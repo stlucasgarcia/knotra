@@ -53,8 +53,8 @@ defmodule KnotraBots do
   Builds the configured model plugin.
 
   `"fake"` selects the offline deterministic model; anything else is passed to
-  `Knotra.Models.ReqLLM`. `GEMINI_API_KEY` is forwarded at runtime only when
-  `GOOGLE_API_KEY` (ReqLLM's provider default) is absent.
+  `Knotra.Models.ReqLLM`. `GEMINI_API_KEY` is forwarded at runtime only for Google
+  models and only when `GOOGLE_API_KEY` (ReqLLM's provider default) is absent.
   """
   def model do
     case configured_model() do
@@ -63,12 +63,12 @@ defmodule KnotraBots do
 
       model ->
         {KnotraBots.Models.Logged,
-         plugin: {Knotra.Models.ReqLLM, model: model, options: model_options("")}}
+         plugin: {Knotra.Models.ReqLLM, model: model, options: model_options(model, "")}}
     end
   end
 
   @doc "ReqLLM options for a bot, including its system prompt when it has one."
-  def model_options(system_prompt) do
+  def model_options(model, system_prompt) do
     opts = [max_tokens: 1024]
 
     opts =
@@ -76,9 +76,10 @@ defmodule KnotraBots do
         do: opts,
         else: Keyword.put(opts, :system_prompt, system_prompt)
 
-    case {System.get_env("GOOGLE_API_KEY"), System.get_env("GEMINI_API_KEY")} do
-      {google, key} when google in [nil, ""] and is_binary(key) and key != "" ->
-        # `.env.example` sets GOOGLE_API_KEY to ""; treat that as absent.
+    case {provider(model), System.get_env("GOOGLE_API_KEY"), System.get_env("GEMINI_API_KEY")} do
+      {"google", google, key} when google in [nil, ""] and is_binary(key) and key != "" ->
+        # `.env.example` sets GOOGLE_API_KEY to ""; treat that as absent. Never
+        # forward a Google credential to a different provider.
         Keyword.put(opts, :api_key, key)
 
       _ ->
@@ -86,10 +87,15 @@ defmodule KnotraBots do
     end
   end
 
+  defp provider(model) when is_binary(model),
+    do: model |> String.split(":", parts: 2) |> hd()
+
+  defp provider(_model), do: nil
+
   @doc "The ReqLLM model plugin for a bot row; shared by single runs and conversations."
   def req_llm_plugin(%{model: model, system_prompt: prompt}) do
     {KnotraBots.Models.Logged,
-     plugin: {Knotra.Models.ReqLLM, model: model, options: model_options(prompt)}}
+     plugin: {Knotra.Models.ReqLLM, model: model, options: model_options(model, prompt)}}
   end
 
   @doc """
@@ -102,7 +108,7 @@ defmodule KnotraBots do
   def model_status(model) when is_binary(model) do
     with {:ok, resolved} <- ReqLLM.model(model),
          {:ok, _key, _source} <-
-           ReqLLM.Keys.get(resolved, Keyword.take(model_options(""), [:api_key])) do
+           ReqLLM.Keys.get(resolved, Keyword.take(model_options(model, ""), [:api_key])) do
       :ok
     else
       {:error, :invalid_format} ->

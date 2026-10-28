@@ -4,12 +4,16 @@ defmodule KnotraBots.Access do
 
   The LiveView supplies a scope map; tenant identity never comes from model
   arguments. Only the `"demo"` tenant is allowed. `:answer` additionally derives a
-  host-authenticated, nonsecret responder reference from the OS user.
+  nonsecret responder reference from the OS user.
+
+  This local demo has no web authentication. `responder/0` distinguishes operators
+  sharing one workstation, not web sessions; a real host must derive the responder
+  from its authenticated session. Scope permissions still gate `:answer`.
   """
 
   @behaviour Knotra.Access
 
-  @actions [:submit, :inspect, :recover, :checkpoint, :answer, :cancel]
+  @actions [:submit, :inspect, :list, :checkpoint, :recover, :answer, :cancel, :close]
 
   @impl true
   def authorize(action, _id, %{tenant: tenant, permissions: permissions})
