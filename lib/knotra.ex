@@ -8,6 +8,10 @@ defmodule Knotra do
   needed. Instance capacity includes retained terminal handles. There is no queue,
   deduplication or restart recovery on this path.
 
+  Every instance also owns a bounded in-memory observability store. Read it with
+  `Knotra.Observability` or mount `Knotra.Dashboard.Live` in a Phoenix LiveView
+  host. Configure retention with the `:observability` instance option.
+
   `submit/6` is a separate opt-in Ecto path for durable acceptance, pending
   approvals and pending input requests (clarification). See
   `docs/durable-approvals.md`. Neither path provides cross-node ownership.
@@ -36,12 +40,14 @@ defmodule Knotra do
     capacity = Keyword.get(opts, :max_executions, 20)
     durable = Keyword.get(opts, :durable)
 
-    validate_instance!(name, capacity, durable)
+    validate_instance!(name, capacity, durable, Keyword.get(opts, :observability, []))
 
     Supervisor.init(
       [
         {Registry, [keys: :unique, name: name, meta: [durable: durable]]},
         {Task.Supervisor, [name: via(name, :tasks)]},
+        {Knotra.Observability.Store,
+         [instance: name, opts: Keyword.get(opts, :observability, [])]},
         {DynamicSupervisor,
          [name: via(name, :executions), strategy: :one_for_one, max_children: capacity]}
       ],
@@ -49,11 +55,23 @@ defmodule Knotra do
     )
   end
 
-  defp validate_instance!(name, capacity, durable) do
+  @observability_keys [:max_records, :max_events, :notify_ms, :message_limit]
+
+  defp validate_observability!(opts) do
+    unless is_list(opts) and Keyword.keyword?(opts) and
+             Enum.all?(Keyword.keys(opts), &(&1 in @observability_keys)) do
+      raise ArgumentError,
+            "observability must be a keyword list with keys #{inspect(@observability_keys)}"
+    end
+  end
+
+  defp validate_instance!(name, capacity, durable, observability) do
     unless is_atom(name) and is_integer(capacity) and capacity > 0 do
       raise ArgumentError,
             "expected :name to be an atom and :max_executions to be a positive integer"
     end
+
+    validate_observability!(observability)
 
     case durable do
       nil ->
@@ -95,15 +113,29 @@ defmodule Knotra do
   Composition and tool definitions are validated before a process starts, so
   invalid tools return `{:error, :invalid_tool_definitions}` instead of an
   asynchronous failure. Capacity errors surface as `{:error, :max_children}`.
+
+  Options are the execution limits plus `:trace`, a map or keyword list used only
+  by the observability store: `:agent`, `:conversation_id`, `:parent_id`, and
+  `:labels`. Unknown trace keys return `{:error, :invalid_configuration}`.
   """
   @spec start(GenServer.server(), Knotra.Definition.t(), String.t(), term(), keyword()) ::
           {:ok, pid()} | {:error, atom()}
   def start(instance, %Knotra.Definition{} = definition, input, context, opts \\ []) do
-    with :ok <- Knotra.Execution.validate(definition, input, opts) do
-      DynamicSupervisor.start_child(
-        via(instance, :executions),
-        {Knotra.Execution, {via(instance, :tasks), definition, input, context, opts}}
-      )
+    {trace, opts} = Keyword.pop(opts, :trace)
+
+    case Knotra.Observability.normalize_trace(trace) do
+      {:ok, trace} ->
+        with :ok <- Knotra.Execution.validate(definition, input, opts) do
+          opts = if trace, do: Keyword.put(opts, :trace, trace), else: opts
+
+          DynamicSupervisor.start_child(
+            via(instance, :executions),
+            {Knotra.Execution, {via(instance, :tasks), definition, input, context, opts}}
+          )
+        end
+
+      :error ->
+        {:error, :invalid_configuration}
     end
   end
 

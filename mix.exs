@@ -25,7 +25,9 @@ defmodule Knotra.MixProject do
       {:req_llm, "~> 1.24.0"},
       {:ecto, "~> 3.14", optional: true},
       {:ecto_sql, "~> 3.14", optional: true},
-      {:ecto_sqlite3, "~> 0.25.0", only: :test}
+      {:ecto_sqlite3, "~> 0.25.0", only: :test},
+      {:phoenix_live_view, "~> 1.1", optional: true},
+      {:lazy_html, ">= 0.1.0", only: :test}
     ]
   end
 end

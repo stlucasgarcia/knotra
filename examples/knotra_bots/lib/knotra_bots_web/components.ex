@@ -32,6 +32,11 @@ defmodule KnotraBotsWeb.Components do
           <span>Manage teammates →</span>
         </a>
 
+        <a class="side-agents" href="/observability">
+          <span class="side-label">Observability</span>
+          <span>Live execution traces →</span>
+        </a>
+
         <div class="side-foot">
           <span class="dot"></span>tenant <code>{KnotraBots.tenant()}</code>
         </div>

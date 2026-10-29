@@ -213,6 +213,16 @@ defmodule KnotraBots.Chat do
                timeout: @execution_timeout
              ) do
           {:ok, execution_id} ->
+            Knotra.Observability.annotate(KnotraBots.Instance, execution_id, %{
+              agent: agent.name,
+              conversation_id: message.root_id || message.id,
+              labels: %{
+                "channel" => message.channel_id,
+                "hop" => message.hop,
+                "message" => message.id
+              }
+            })
+
             put_message(message, %{
               execution_id: execution_id,
               definition_version: definition.version,

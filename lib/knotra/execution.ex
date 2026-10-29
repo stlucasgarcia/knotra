@@ -15,21 +15,27 @@ defmodule Knotra.Execution do
   end
 
   def init({tasks, definition, input, auth, opts, durable}) do
+    {trace, opts} = Keyword.pop(opts, :trace)
+
     if valid_options?(definition, input, opts) do
       Process.flag(:trap_exit, true)
       limits = Map.new(limits(opts))
       started_at = System.monotonic_time(:millisecond)
+      started_at_system = System.system_time(:millisecond)
       timer = Process.send_after(self(), :deadline, limits.timeout)
 
       state = %{
         tasks: tasks,
         instance: instance_name(tasks),
         definition: definition,
+        definition_meta: Knotra.Observability.describe_definition(definition),
+        trace: trace || Knotra.Observability.empty_trace(),
         input: input,
         auth: auth,
         limits: limits,
-        id: System.unique_integer([:positive, :monotonic]),
+        id: execution_id(durable),
         started_at: started_at,
+        started_at_system: started_at_system,
         deadline_at: started_at + limits.timeout,
         status: :running,
         events: [],
@@ -47,6 +53,8 @@ defmodule Knotra.Execution do
         timer: timer,
         observation_error: nil
       }
+
+      Knotra.Observability.register(state)
 
       {:ok, initialize(state, durable)}
     else
@@ -94,7 +102,9 @@ defmodule Knotra.Execution do
   end
 
   def handle_info(:observer_deadline, %{stage: :terminal_observation, task: %Task{}} = state) do
-    durable_result(%{stop_task(state) | observation_error: :observer_timeout})
+    state = %{stop_task(state) | observation_error: :observer_timeout}
+    Knotra.Observability.update(state)
+    durable_result(state)
   end
 
   def handle_info(_message, state), do: {:noreply, state}
@@ -144,7 +154,9 @@ defmodule Knotra.Execution do
 
   defp consume(_result, %{stage: :terminal_observation} = state) do
     Process.cancel_timer(state.timer)
-    %{state | observation_error: :observer_failed}
+    state = %{state | observation_error: :observer_failed}
+    Knotra.Observability.update(state)
+    state
   end
 
   defp consume({:plugin_error, reason}, state), do: finish(state, :failed, reason)
@@ -536,6 +548,8 @@ defmodule Knotra.Execution do
       data: data
     }
 
+    Knotra.Observability.record_event(state, entry)
+
     %{state | events: [entry | state.events], next_sequence: sequence}
   end
 
@@ -616,6 +630,9 @@ defmodule Knotra.Execution do
       _ -> nil
     end)
   end
+
+  defp execution_id(%{row: %{id: id}}), do: id
+  defp execution_id(_durable), do: System.unique_integer([:positive, :monotonic])
 
   defp initialize(state, durable) do
     state = Map.merge(state, %{durable: durable, approval: nil, input_request: nil})

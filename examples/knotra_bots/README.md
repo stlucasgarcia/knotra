@@ -181,6 +181,22 @@ Each agent message shows its live state:
 - The **trace** disclosure shows turn/tool/retry counts, the event sequence and
   elapsed milliseconds, and the pinned definition version.
 
+## Observability
+
+`http://localhost:4000/observability` mounts `Knotra.Dashboard.Live`. It shows
+the agents that have run, their models and tools, live and completed executions,
+the conversation topology across handoffs, and a message feed spanning every
+execution. Select an execution to inspect its full timeline: input, model
+requests and replies, tool calls and results, clarification and approval gates,
+usage, and terminal errors.
+
+Every chat submission annotates its durable execution with the agent name,
+channel, conversation root, hop, and message id, so handoffs appear as connected
+conversation steps and as agent-to-agent edges. The dashboard reads the
+instance's bounded in-memory store: it covers work since this BEAM started, not
+durable history from before a restart. It is a debugging surface and must stay
+behind the host's authentication; it renders message text and tool arguments.
+
 ## Tool approval policy
 
 Knotra's durable path records a bound approval before every tool call; that is the

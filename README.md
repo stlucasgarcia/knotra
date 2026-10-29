@@ -65,6 +65,102 @@ that was already released or terminated. Snapshots disappear when their executio
 process or host stops. IDs are unique only within the current BEAM instance, not
 durable global identifiers.
 
+## Observability dashboard (Phoenix LiveView)
+
+Every instance owns a bounded, in-memory observability store. It records agent
+definitions and models, execution status, counters, the full event timeline
+(input, model text, tool calls and results, usage, approvals, failures), and the
+messages exchanged during each run. The store is a debugging surface, not a
+durable audit log: it does not survive a BEAM restart.
+
+```elixir
+{Knotra,
+ name: MyApp.Agents,
+ max_executions: 20,
+ observability: [max_records: 200, max_events: 2_000, notify_ms: 100]}
+```
+
+Add `{:phoenix_live_view, "~> 1.1"}` to the host and mount the dashboard inside a
+protected browser pipeline:
+
+```elixir
+# router.ex
+import Phoenix.LiveView.Router
+import Knotra.Dashboard.Router
+
+scope "/" do
+  pipe_through [:browser, :require_admin]
+
+  knotra_dashboard "/knotra", instance: MyApp.Agents
+end
+```
+
+The route renders execution inputs, model text, and tool arguments. Protect it
+with the host's own authentication and authorization; the library does not
+provide access control. `Knotra.Dashboard.available?/0` reports whether the
+LiveView modules were compiled into the build.
+
+The dashboard has five surfaces:
+
+- **Overview** - counters, active executions, agent definitions and their models,
+  and the newest messages.
+- **Executions** - filterable table with status, agent, model, duration, counters,
+  and input; selecting a row opens the full event timeline.
+- **Agents** - definitions aggregated by version, with model, tools, loop, tool
+  runtime, observer, run counts, and execution links.
+- **Topology** - conversations ordered oldest-first, agent-to-agent handoffs, and
+  explicit links between executions.
+- **Messages** - a cross-execution feed of inputs, assistant replies, tool
+  results, human answers, and failures.
+
+### Correlating work
+
+Non-durable executions accept a `:trace` option:
+
+```elixir
+Knotra.start(MyApp.Agents, definition, input, context,
+  trace: %{
+    agent: "concierge",
+    conversation_id: "conversation-42",
+    parent_id: parent_execution_id,
+    labels: %{"channel" => "support"}
+  })
+```
+
+Durable executions are annotated after `Knotra.submit/6` returns their id, and
+hosts can record an edge they know about explicitly:
+
+```elixir
+Knotra.Observability.annotate(MyApp.Agents, execution_id, %{
+  agent: "researcher",
+  conversation_id: "conversation-42"
+})
+
+Knotra.Observability.link(MyApp.Agents, parent_id, child_id, label: "handoff")
+```
+
+`conversation_id` groups executions into one flow; `parent_id` adds a directed
+edge; `agent` overrides the definition version as the display label; `labels`
+are shown in the execution detail. Topology derives agent-to-agent edges from
+both explicit links and consecutive executions sharing a conversation.
+
+The same data is available without LiveView:
+
+```elixir
+Knotra.Observability.snapshot(MyApp.Agents)
+Knotra.Observability.agents(MyApp.Agents)
+Knotra.Observability.executions(MyApp.Agents)
+Knotra.Observability.execution(MyApp.Agents, id)
+Knotra.Observability.messages(MyApp.Agents, message_limit: 100)
+Knotra.Observability.graph(MyApp.Agents)
+Knotra.Observability.stats(MyApp.Agents)
+```
+
+Retention evicts the oldest terminal execution first; running executions are
+never evicted. `:max_records` and `:max_events` accept `:infinity`. Model and tool
+options, authorization context, and private continuations are never copied into
+the store. Inputs and outputs may still contain confidential data.
+
 ## Host tools: validation before authorization before execution
 
 Tools implement `Knotra.Tool`:

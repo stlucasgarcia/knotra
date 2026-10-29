@@ -5,6 +5,7 @@ defmodule KnotraBotsWeb.Router do
   import Plug.Conn
   import Phoenix.Controller
   import Phoenix.LiveView.Router
+  import Knotra.Dashboard.Router
 
   pipeline :browser do
     plug :accepts, ["html"]
@@ -19,5 +20,6 @@ defmodule KnotraBotsWeb.Router do
     live "/channels", ChannelsLive, :index
     live "/channels/:id", ChatLive, :show
     live "/agents", AgentsLive, :index
+    knotra_dashboard("/observability", instance: KnotraBots.Instance)
   end
 end

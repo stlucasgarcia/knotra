@@ -147,6 +147,57 @@ defmodule KnotraBotsTest do
     refute Enum.any?(agent_messages(channel.id), &(&1.agent_id == alpha.id))
   end
 
+  test "the observability dashboard exposes agents, models, conversations, and messages",
+       %{notices: _notices} do
+    agent = agent_fixture(%{"name" => "Observable", "handle" => unique_handle("observable")})
+    channel = channel_fixture([agent])
+
+    {:ok, chat, _html} = live(build_conn(), "/channels/#{channel.id}")
+    submit_message(chat, "observability check")
+
+    message =
+      await_agent_message(
+        channel.id,
+        &(&1.agent_id == agent.id and &1.status == "completed")
+      )
+
+    assert message.body =~ "Observable received: observability check"
+
+    Knotra.Observability.sync(KnotraBots.Instance)
+    assert {:ok, executions} = Knotra.Observability.executions(KnotraBots.Instance)
+    assert Enum.any?(executions, &(&1.id == message.execution_id))
+    refute Enum.any?(executions, &is_integer(&1.id))
+
+    {:ok, dashboard, html} = live(build_conn(), "/observability")
+
+    assert html =~ "Knotra Observability"
+    assert html =~ "Observable"
+    assert html =~ "ChatFake"
+    assert html =~ "observability check"
+
+    dashboard |> element(~s(button.k-tab[phx-value-tab=\"messages\"])) |> render_click()
+    messages = render(dashboard)
+    assert messages =~ "Observable received: observability check"
+    assert messages =~ "observability check"
+
+    dashboard |> element(~s(button.k-tab[phx-value-tab=\"topology\"])) |> render_click()
+    topology = render(dashboard)
+    assert topology =~ "Conversations"
+    assert topology =~ "Observable"
+    assert topology =~ to_string(message.root_id)
+
+    dashboard |> element(~s(button.k-tab[phx-value-tab=\"executions\"])) |> render_click()
+
+    dashboard
+    |> element(~s([phx-value-id="#{message.execution_id}"]))
+    |> render_click()
+
+    detail = render(dashboard)
+    assert detail =~ "Timeline"
+    assert detail =~ "Observable received: observability check"
+    assert detail =~ "ChatFake"
+  end
+
   test "a concierge handoff becomes a researcher lookup that runs without a human gate",
        %{notices: _notices} do
     concierge = Agents.get!("concierge")
@@ -183,6 +234,17 @@ defmodule KnotraBotsTest do
 
     html = await_html(view, &String.contains?(&1, "Order ord-1 shipped"))
     refute html =~ ~s(data-testid="approval")
+
+    Knotra.Observability.sync(KnotraBots.Instance)
+    assert {:ok, graph} = Knotra.Observability.graph(KnotraBots.Instance)
+
+    assert Enum.any?(graph.agent_edges, fn edge ->
+             edge.from == "Concierge" and edge.to == "Researcher"
+           end)
+
+    assert Enum.any?(graph.conversations, fn conversation ->
+             Enum.map(conversation.executions, & &1.agent) == ["Concierge", "Researcher"]
+           end)
   end
 
   test "approving notify writes exactly one fake notice", %{notices: notices} do
