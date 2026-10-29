@@ -12,6 +12,22 @@ defmodule Knotra.ObservabilityTest do
     end
   end
 
+  defmodule GateLoop do
+    @behaviour Knotra.Loop
+
+    @impl true
+    def init(opts), do: Keyword.fetch!(opts, :owner)
+
+    @impl true
+    def next(_view, owner) do
+      send(owner, {:gate, self()})
+
+      receive do
+        {:return, output} -> {:done, output}
+      end
+    end
+  end
+
   setup do
     instance = :"knotra_obs_#{System.unique_integer([:positive])}"
 
@@ -140,6 +156,37 @@ defmodule Knotra.ObservabilityTest do
              Knotra.start(instance, definition, "bad trace", %{}, trace: %{bogus: true})
 
     assert {:error, :invalid_trace} = Knotra.Observability.annotate(instance, 1, %{bogus: true})
+  end
+
+  test "retains running executions when terminal records exceed the cap" do
+    instance = :"knotra_obs_running_#{System.unique_integer([:positive])}"
+
+    start_supervised!(
+      {Knotra,
+       name: instance,
+       max_executions: 5,
+       observability: [max_records: 1, max_events: 50, notify_ms: 0]}
+    )
+
+    definition = %Definition{
+      version: "gated-v1",
+      model: {Model, model: "fake:observable"},
+      loop: {GateLoop, [owner: self()]}
+    }
+
+    assert {:ok, pid} = Knotra.start(instance, definition, "hold", %{})
+    assert_receive {:gate, _task}, 500
+    running = Knotra.snapshot(pid)
+
+    _terminal = run(instance, "terminal")
+    Knotra.Observability.sync(instance)
+
+    assert {:ok, executions} = Knotra.Observability.executions(instance)
+    assert [retained] = executions
+    assert retained.id == running.id
+    assert retained.status == :running
+
+    assert :ok = Knotra.cancel(pid)
   end
 
   test "retains a bounded number of terminal executions" do

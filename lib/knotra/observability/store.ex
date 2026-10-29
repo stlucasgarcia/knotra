@@ -357,9 +357,12 @@ defmodule Knotra.Observability.Store do
   end
 
   defp oldest_terminal(records) do
-    records
-    |> Enum.filter(fn {_id, record} -> record.status in @terminal end)
-    |> Enum.min_by(fn {_id, record} -> {record.started_at, record.seq} end, &<=/2, nil)
+    terminals = Enum.filter(records, fn {_id, record} -> record.status in @terminal end)
+
+    case terminals do
+      [] -> nil
+      terminals -> Enum.min_by(terminals, fn {_id, record} -> {record.started_at, record.seq} end)
+    end
   end
 
   defp mark_dirty(%{subscribers: subscribers, notify_timer: nil, notify_ms: ms} = state)
