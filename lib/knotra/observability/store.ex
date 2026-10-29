@@ -105,7 +105,7 @@ defmodule Knotra.Observability.Store do
           record
           |> Map.put(:events, events)
           |> Map.put(:duration_ms, max(finish - record.started_at, 0))
-          |> Map.put(:truncated?, record.event_count > length(events))
+          |> Map.put(:truncated?, record.event_count > record.retained_events)
 
         {:reply, {:ok, record}, state}
 
@@ -223,6 +223,7 @@ defmodule Knotra.Observability.Store do
       finished_at: nil,
       events: [],
       event_count: 0,
+      retained_events: 0,
       seq: seq
     }
   end
@@ -237,9 +238,16 @@ defmodule Knotra.Observability.Store do
 
   defp maybe_append(record, entry, max_events) do
     events = [entry | record.events]
-    events = if max_events == :infinity, do: events, else: Enum.take(events, max_events)
+    retained = record.retained_events + 1
 
-    %{record | events: events, event_count: record.event_count + 1}
+    {events, retained} =
+      if max_events == :infinity or retained <= max_events do
+        {events, retained}
+      else
+        {Enum.take(events, max_events), max_events}
+      end
+
+    %{record | events: events, event_count: record.event_count + 1, retained_events: retained}
   end
 
   defp maybe_finish(%{finished_at: nil} = record, now) do

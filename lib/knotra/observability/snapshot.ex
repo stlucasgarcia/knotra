@@ -34,7 +34,7 @@ defmodule Knotra.Observability.Snapshot do
     record
     |> Map.drop([:events])
     |> Map.put(:duration_ms, duration_ms(record))
-    |> Map.put(:truncated?, record.event_count > length(record.events))
+    |> Map.put(:truncated?, record.event_count > record.retained_events)
   end
 
   defp stats(records, agents) do
