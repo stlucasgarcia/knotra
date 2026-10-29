@@ -237,11 +237,17 @@ defmodule Knotra.Observability.Snapshot do
     |> Enum.flat_map(fn record ->
       record.events
       |> Enum.take(limit)
-      |> Enum.filter(&(&1.type in @message_events))
-      |> Enum.map(&message(record, &1))
+      |> Enum.flat_map(fn event ->
+        if event.type in @message_events do
+          [{record.started_at + event.elapsed_ms, record, event}]
+        else
+          []
+        end
+      end)
     end)
-    |> Enum.sort_by(& &1.at, :desc)
+    |> Enum.sort_by(&elem(&1, 0), :desc)
     |> Enum.take(limit)
+    |> Enum.map(fn {_at, record, event} -> message(record, event) end)
   end
 
   defp message(record, event) do
