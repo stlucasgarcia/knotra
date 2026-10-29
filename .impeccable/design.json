@@ -1,0 +1,649 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-10-29T19:45:11+00:00",
+  "title": "Design System: Knotra",
+  "extensions": {
+    "colorMeta": {
+      "vellum": {
+        "role": "neutral",
+        "displayName": "Vellum",
+        "canonical": "oklch(97.3% 0.005 95.1)",
+        "tonalRamp": [
+          "#0b0b0a",
+          "#262523",
+          "#43423f",
+          "#62615e",
+          "#83827f",
+          "#a6a5a2",
+          "#cac9c7",
+          "#efeeed"
+        ]
+      },
+      "margin-paper": {
+        "role": "neutral",
+        "displayName": "Margin Paper",
+        "canonical": "oklch(98.5% 0.004 91.4)",
+        "tonalRamp": [
+          "#0b0b0a",
+          "#262523",
+          "#434240",
+          "#62615f",
+          "#838280",
+          "#a6a5a3",
+          "#cac9c7",
+          "#efeeed"
+        ]
+      },
+      "paper": {
+        "role": "neutral",
+        "displayName": "Paper",
+        "canonical": "oklch(100.0% 0.000 89.9)",
+        "tonalRamp": [
+          "#0b0b0b",
+          "#252525",
+          "#424242",
+          "#616161",
+          "#828282",
+          "#a5a5a5",
+          "#c9c9c9",
+          "#eeeeee"
+        ]
+      },
+      "ledger-toned": {
+        "role": "neutral",
+        "displayName": "Ledger Toned",
+        "canonical": "oklch(94.8% 0.007 97.4)",
+        "tonalRamp": [
+          "#0c0b09",
+          "#262522",
+          "#43423e",
+          "#62615d",
+          "#83827e",
+          "#a6a5a1",
+          "#cac9c6",
+          "#efeeed"
+        ]
+      },
+      "iron-gall": {
+        "role": "neutral",
+        "displayName": "Iron Gall",
+        "canonical": "oklch(21.6% 0.006 121.9)",
+        "tonalRamp": [
+          "#0b0b0a",
+          "#252523",
+          "#41423f",
+          "#60625e",
+          "#82837f",
+          "#a4a5a2",
+          "#c9c9c7",
+          "#eeefed"
+        ]
+      },
+      "ledger-grey": {
+        "role": "neutral",
+        "displayName": "Ledger Grey",
+        "canonical": "oklch(53.6% 0.014 121.9)",
+        "tonalRamp": [
+          "#0a0c08",
+          "#242620",
+          "#41433b",
+          "#60635a",
+          "#81847b",
+          "#a4a69e",
+          "#c8cac4",
+          "#eeefeb"
+        ]
+      },
+      "rule-line": {
+        "role": "neutral",
+        "displayName": "Rule Line",
+        "canonical": "oklch(90.9% 0.009 100.0)",
+        "tonalRamp": [
+          "#0c0b09",
+          "#262521",
+          "#43423d",
+          "#62615b",
+          "#83827c",
+          "#a6a5a0",
+          "#cac9c5",
+          "#efeeec"
+        ]
+      },
+      "registry-green": {
+        "role": "primary",
+        "displayName": "Registry Green",
+        "canonical": "oklch(48.4% 0.097 158.9)",
+        "tonalRamp": [
+          "#001203",
+          "#003016",
+          "#00502f",
+          "#22724c",
+          "#4c936e",
+          "#78b593",
+          "#a9d6bb",
+          "#ddf6e7"
+        ]
+      },
+      "registry-wash": {
+        "role": "primary",
+        "displayName": "Registry Wash",
+        "canonical": "oklch(94.5% 0.019 157.9)",
+        "tonalRamp": [
+          "#070d09",
+          "#1f2722",
+          "#3a453e",
+          "#59655d",
+          "#7a867e",
+          "#9da8a1",
+          "#c3ccc6",
+          "#ebf0ed"
+        ]
+      },
+      "ochre-stamp": {
+        "role": "semantic",
+        "displayName": "Ochre Stamp",
+        "canonical": "oklch(54.4% 0.117 70.8)",
+        "tonalRamp": [
+          "#1c0400",
+          "#401900",
+          "#653400",
+          "#8a5300",
+          "#ac752a",
+          "#cc9b5f",
+          "#e8c296",
+          "#ffebd3"
+        ]
+      },
+      "ochre-wash": {
+        "role": "semantic",
+        "displayName": "Ochre Wash",
+        "canonical": "oklch(98.0% 0.025 89.2)",
+        "tonalRamp": [
+          "#0e0b05",
+          "#29251a",
+          "#474234",
+          "#676151",
+          "#888273",
+          "#aaa597",
+          "#cdc9be",
+          "#f1eee8"
+        ]
+      },
+      "ochre-rule": {
+        "role": "semantic",
+        "displayName": "Ochre Rule",
+        "canonical": "oklch(89.1% 0.070 87.4)",
+        "tonalRamp": [
+          "#120900",
+          "#312300",
+          "#513f11",
+          "#725f2f",
+          "#948052",
+          "#b5a37b",
+          "#d5c8aa",
+          "#f5eedd"
+        ]
+      },
+      "red-seal": {
+        "role": "semantic",
+        "displayName": "Red Seal",
+        "canonical": "oklch(47.6% 0.154 28.7)",
+        "tonalRamp": [
+          "#260000",
+          "#520000",
+          "#7e0d0a",
+          "#a73329",
+          "#cb5a4d",
+          "#ea8477",
+          "#ffb2a6",
+          "#ffe2db"
+        ]
+      },
+      "red-wash": {
+        "role": "semantic",
+        "displayName": "Red Wash",
+        "canonical": "oklch(95.0% 0.019 29.5)",
+        "tonalRamp": [
+          "#100908",
+          "#2c2221",
+          "#4b3f3c",
+          "#6c5d5b",
+          "#8d7f7c",
+          "#afa29f",
+          "#d1c6c5",
+          "#f3edec"
+        ]
+      },
+      "approval-wash": {
+        "role": "semantic",
+        "displayName": "Approval Wash",
+        "canonical": "oklch(97.7% 0.012 37.4)",
+        "tonalRamp": [
+          "#0e0a09",
+          "#292422",
+          "#47403e",
+          "#675f5d",
+          "#89807e",
+          "#aba3a1",
+          "#cdc8c6",
+          "#f1eeed"
+        ]
+      },
+      "approval-rule": {
+        "role": "semantic",
+        "displayName": "Approval Rule",
+        "canonical": "oklch(88.1% 0.040 31.6)",
+        "tonalRamp": [
+          "#140806",
+          "#331f1b",
+          "#543b36",
+          "#765953",
+          "#987a74",
+          "#b99e99",
+          "#d9c4bf",
+          "#f7ebe9"
+        ]
+      },
+      "agent-slate": {
+        "role": "identity",
+        "displayName": "Agent Slate",
+        "canonical": "oklch(52.0% 0.073 237.6)",
+        "tonalRamp": [
+          "#000d1b",
+          "#00283e",
+          "#164762",
+          "#356786",
+          "#5989a8",
+          "#81abc7",
+          "#afcee3",
+          "#e0f1fd"
+        ]
+      },
+      "agent-plum": {
+        "role": "identity",
+        "displayName": "Agent Plum",
+        "canonical": "oklch(52.9% 0.109 304.6)",
+        "tonalRamp": [
+          "#110320",
+          "#2f1646",
+          "#4f316d",
+          "#6f5093",
+          "#9172b5",
+          "#b297d3",
+          "#d3bfed",
+          "#f4e9ff"
+        ]
+      },
+      "agent-clay": {
+        "role": "identity",
+        "displayName": "Agent Clay",
+        "canonical": "oklch(54.8% 0.100 43.7)",
+        "tonalRamp": [
+          "#1d0200",
+          "#431400",
+          "#6a2e11",
+          "#904c2e",
+          "#b26f52",
+          "#d2947b",
+          "#edbda9",
+          "#ffe8dd"
+        ]
+      },
+      "agent-moss": {
+        "role": "identity",
+        "displayName": "Agent Moss",
+        "canonical": "oklch(54.0% 0.077 164.4)",
+        "tonalRamp": [
+          "#001106",
+          "#002e1d",
+          "#0f4e38",
+          "#316f56",
+          "#569177",
+          "#80b29b",
+          "#aed3c1",
+          "#e0f4ea"
+        ]
+      },
+      "agent-brass": {
+        "role": "identity",
+        "displayName": "Agent Brass",
+        "canonical": "oklch(55.1% 0.088 83.9)",
+        "tonalRamp": [
+          "#150800",
+          "#352100",
+          "#573d00",
+          "#795c1c",
+          "#9a7e44",
+          "#bba270",
+          "#dac7a2",
+          "#f8edd9"
+        ]
+      },
+      "agent-rose": {
+        "role": "identity",
+        "displayName": "Agent Rose",
+        "canonical": "oklch(51.6% 0.092 7.6)",
+        "tonalRamp": [
+          "#1c0107",
+          "#41121e",
+          "#672b39",
+          "#8d4958",
+          "#b06c79",
+          "#cf919c",
+          "#ebbbc2",
+          "#ffe6eb"
+        ]
+      },
+      "nav-ink": {
+        "role": "neutral",
+        "displayName": "Nav Ink",
+        "canonical": "oklch(36.0% 0.010 122.0)",
+        "tonalRamp": [
+          "#0b0c09",
+          "#242621",
+          "#41433d",
+          "#60625c",
+          "#81837d",
+          "#a4a6a0",
+          "#c8cac5",
+          "#eeefec"
+        ]
+      },
+      "mention-on-ink": {
+        "role": "primary",
+        "displayName": "Mention on Ink",
+        "canonical": "oklch(94.0% 0.035 159.7)",
+        "tonalRamp": [
+          "#040e08",
+          "#192920",
+          "#32483c",
+          "#50685a",
+          "#71897b",
+          "#96ab9f",
+          "#becec4",
+          "#e8f1ec"
+        ]
+      }
+    },
+    "typographyMeta": {
+      "headline": {
+        "displayName": "Headline",
+        "purpose": "Channel name and dashboard title; carries the screen, never behind an eyebrow."
+      },
+      "title": {
+        "displayName": "Title",
+        "purpose": "Page headings on /agents and /channels. One per page."
+      },
+      "body": {
+        "displayName": "Body",
+        "purpose": "Messages, panel text, descriptions at 860px max measure."
+      },
+      "label": {
+        "displayName": "Label",
+        "purpose": "Field names, table headers, status pills. Uppercase and tracked, never a sentence."
+      },
+      "mono": {
+        "displayName": "Mono",
+        "purpose": "Ids, handles, arguments, versions, timings, usage — values a reader may compare."
+      },
+      "metric": {
+        "displayName": "Metric",
+        "purpose": "The single number inside a metric tile."
+      }
+    },
+    "shadows": [
+      {
+        "name": "sheet",
+        "value": "0 1px 2px rgba(20,20,15,.04), 0 8px 24px rgba(20,20,15,.04)",
+        "purpose": "Cards, panels, bubbles, metric tiles, sticky detail rail."
+      },
+      {
+        "name": "event-line",
+        "value": "0 1px 2px rgba(20, 20, 15, 0.03)",
+        "purpose": "Individual timeline events, one step lighter than a sheet."
+      },
+      {
+        "name": "popover",
+        "value": "0 18px 42px rgba(20, 20, 15, 0.14), 0 2px 6px rgba(20, 20, 15, 0.06)",
+        "purpose": "The @ mention menu only."
+      }
+    ],
+    "motion": [
+      {
+        "name": "typing-blink",
+        "value": "@keyframes blink { 0%,80%,100% { opacity:.25 } 40% { opacity:1 } }",
+        "purpose": "Three-dot working indicator, 1.2s infinite with 0.2s stagger. The only continuous animation."
+      },
+      {
+        "name": "live-arrival",
+        "value": "LiveView patch, no CSS transition",
+        "purpose": "New message or execution row appears immediately; status dots and pills change in place."
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "demo-rail-collapse",
+        "value": "760px"
+      },
+      {
+        "name": "dashboard-detail-stack",
+        "value": "980px"
+      }
+    ],
+    "contrastNotes": [
+      {
+        "pair": "iron-gall on vellum",
+        "ratio": 16.16,
+        "status": "pass"
+      },
+      {
+        "pair": "ledger-grey on vellum",
+        "ratio": 4.73,
+        "status": "pass"
+      },
+      {
+        "pair": "ledger-grey on ledger-toned",
+        "ratio": 4.41,
+        "status": "fail for body text — use vellum/paper/margin-paper only"
+      },
+      {
+        "pair": "registry-green on paper",
+        "ratio": 6.12,
+        "status": "pass"
+      },
+      {
+        "pair": "registry-green on registry-wash",
+        "ratio": 5.25,
+        "status": "pass"
+      },
+      {
+        "pair": "ochre-stamp on ochre-wash",
+        "ratio": 4.81,
+        "status": "pass"
+      },
+      {
+        "pair": "red-seal on red-wash",
+        "ratio": 6.18,
+        "status": "pass"
+      },
+      {
+        "pair": "nav-ink on margin-paper",
+        "ratio": 10.38,
+        "status": "pass"
+      },
+      {
+        "pair": "mention-on-ink on iron-gall",
+        "ratio": 14.86,
+        "status": "pass"
+      },
+      {
+        "pair": "ledger-grey on margin-paper",
+        "ratio": 4.9,
+        "status": "pass"
+      }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "The one filled action on a view: Send, Create, Approve.",
+      "html": "<button class=\"ds-btn-primary\">Send</button>",
+      "css": ".ds-btn-primary{appearance:none;border:1px solid #191a17;border-radius:8px;background:#191a17;color:#fff;font:400 13.6px/1.2 ui-sans-serif,system-ui,-apple-system,\"Segoe UI\",sans-serif;padding:8px 14px;cursor:pointer;}.ds-btn-primary:hover{opacity:.9;}.ds-btn-primary:active{opacity:.82;}"
+    },
+    {
+      "name": "Ghost Button",
+      "kind": "button",
+      "refersTo": "button-ghost",
+      "description": "Secondary action: Reject, Dismiss, anything that must not compete with the ink button.",
+      "html": "<button class=\"ds-btn-ghost\">Reject</button>",
+      "css": ".ds-btn-ghost{appearance:none;border:1px solid #e2e1da;border-radius:8px;background:transparent;color:#191a17;font:400 13.6px/1.2 ui-sans-serif,system-ui,-apple-system,\"Segoe UI\",sans-serif;padding:8px 14px;cursor:pointer;}.ds-btn-ghost:hover{border-color:#191a17;}.ds-btn-ghost:active{background:#efeee9;}"
+    },
+    {
+      "name": "Text Input",
+      "kind": "input",
+      "refersTo": "input-text",
+      "description": "Filter and form field; the composer textarea is the same treatment at 12px radius.",
+      "html": "<input class=\"ds-input\" type=\"text\" placeholder=\"Filter by id, agent or model\" />",
+      "css": ".ds-input{box-sizing:border-box;width:100%;border:1px solid #e2e1da;border-radius:8px;background:#fff;color:#191a17;font:400 13.6px/1.2 ui-sans-serif,system-ui,-apple-system,\"Segoe UI\",sans-serif;padding:8px 10px;}.ds-input::placeholder{color:#6c6f66;}.ds-input:focus{outline:2px solid #e3f1e8;border-color:#1f6f4a;}"
+    },
+    {
+      "name": "Panel",
+      "kind": "card",
+      "refersTo": "card-panel",
+      "description": "The white sheet every section sits on, over vellum.",
+      "html": "<section class=\"ds-panel\"><h2 class=\"ds-panel-title\">Recent executions</h2><p class=\"ds-panel-note\">Since this BEAM started. Not durable history.</p></section>",
+      "css": ".ds-panel{border:1px solid #e2e1da;border-radius:14px;background:#fff;padding:16px;box-shadow:0 1px 2px rgba(20,20,15,.04), 0 8px 24px rgba(20,20,15,.04);color:#191a17;font:400 14.4px/1.45 ui-sans-serif,system-ui,-apple-system,\"Segoe UI\",sans-serif;}.ds-panel-title{margin:0;font-size:15.2px;font-weight:650;letter-spacing:-.01em;}.ds-panel-note{margin:6px 0 0;color:#6c6f66;font-size:12.5px;}"
+    },
+    {
+      "name": "Agent Message Bubble",
+      "kind": "custom",
+      "description": "Signature silhouette: paper sheet with the author's corner flattened to 4px.",
+      "html": "<div class=\"ds-bubble-agent\"><p>Handing this to <span class=\"ds-mention\">@researcher</span>.</p><p class=\"ds-bubble-meta\">concierge · <code>ord-1</code> · done</p></div>",
+      "css": ".ds-bubble-agent{max-width:520px;border:1px solid #e2e1da;border-radius:4px 14px 14px 14px;background:#fff;padding:10px 13px;box-shadow:0 1px 2px rgba(20,20,15,.04), 0 8px 24px rgba(20,20,15,.04);color:#191a17;font:400 14.7px/1.5 ui-sans-serif,system-ui,-apple-system,\"Segoe UI\",sans-serif;}.ds-bubble-agent p{margin:0;}.ds-mention{border-radius:5px;background:#e3f1e8;color:#1f6f4a;font-weight:550;padding:0 3px;}.ds-bubble-meta{margin-top:4px !important;color:#6c6f66;font-size:12.5px;}.ds-bubble-meta code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11.5px;background:#efeee9;border-radius:5px;padding:1px 5px;}"
+    },
+    {
+      "name": "Human Message Bubble",
+      "kind": "custom",
+      "description": "The same silhouette inverted to iron gall, corner flattened on the sender's side.",
+      "html": "<div class=\"ds-bubble-human\"><p>notify ops that order ord-1 shipped</p></div>",
+      "css": ".ds-bubble-human{max-width:520px;border:1px solid #191a17;border-radius:14px 4px 14px 14px;background:#191a17;color:#fff;padding:10px 13px;box-shadow:0 1px 2px rgba(20,20,15,.04), 0 8px 24px rgba(20,20,15,.04);font:400 14.7px/1.5 ui-sans-serif,system-ui,-apple-system,\"Segoe UI\",sans-serif;}.ds-bubble-human p{margin:0;}"
+    },
+    {
+      "name": "Status Pill",
+      "kind": "chip",
+      "refersTo": "pill-status-done",
+      "description": "State is always pill + word + hue; never color alone.",
+      "html": "<span class=\"ds-pill\"><span class=\"ds-pill-dot\"></span>done</span>",
+      "css": ".ds-pill{display:inline-flex;align-items:center;gap:4px;border-radius:999px;background:#e3f1e8;color:#1f6f4a;font:600 10.9px/1.2 ui-sans-serif,system-ui,-apple-system,\"Segoe UI\",sans-serif;letter-spacing:.05em;text-transform:uppercase;padding:2px 7px;}.ds-pill-dot{width:5px;height:5px;border-radius:50%;background:currentColor;}"
+    },
+    {
+      "name": "Status Rail Event",
+      "kind": "card",
+      "description": "Timeline and feed card; the 3px rail is the fastest scan cue and must agree with the pill.",
+      "html": "<article class=\"ds-event\"><header class=\"ds-event-head\"><span class=\"ds-seq\">3</span><strong>tool_result</strong><span class=\"ds-event-time\">+412 ms</span></header><p><code>lookup</code></p><pre>{\"ok\":true,\"order\":\"ord-1\"}</pre></article>",
+      "css": ".ds-event{border:1px solid #e2e1da;border-left:3px solid #1f6f4a;border-radius:10px;background:#fff;padding:7px 10px;box-shadow:0 1px 2px rgba(20,20,15,.03);color:#191a17;font:400 12.5px/1.45 ui-sans-serif,system-ui,-apple-system,\"Segoe UI\",sans-serif;}.ds-event-head{display:flex;align-items:center;gap:7px;font-size:11.2px;}.ds-event-head strong{font-size:11.2px;}.ds-seq{display:inline-grid;place-items:center;min-width:20px;height:18px;border-radius:5px;background:#efeee9;color:#6c6f66;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:9.9px;}.ds-event-time{color:#6c6f66;}.ds-event p{margin:3px 0 0;}.ds-event code,.ds-event pre{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12.5px;white-space:pre-wrap;overflow-wrap:anywhere;}.ds-event pre{margin:3px 0 0;}.ds-event code{color:#191a17;}"
+    },
+    {
+      "name": "Approval Gate",
+      "kind": "custom",
+      "refersTo": null,
+      "description": "Inline gate in the message it blocks: wash plus border carry the seal, never a dialog.",
+      "html": "<div class=\"ds-gate is-approval\"><p class=\"ds-gate-title\">Approval required</p><p>Run <code class=\"ds-gate-op\">notify</code> with</p><pre>{\"to\":\"ops\",\"message\":\"order ord-1 shipped\"}</pre><div class=\"ds-gate-actions\"><button class=\"ds-gate-btn\">Approve</button><button class=\"ds-gate-btn is-ghost\">Reject</button></div></div>",
+      "css": ".ds-gate{max-width:420px;border:1px solid #efd9a6;border-radius:10px;background:#fff8e6;color:#191a17;padding:10px 12px;font:400 14.4px/1.45 ui-sans-serif,system-ui,-apple-system,\"Segoe UI\",sans-serif;}.ds-gate.is-approval{border-color:#f1cfc8;background:#fff5f2;}.ds-gate-title{margin:0 0 4px;color:#9a6200;font-size:11.5px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;}.ds-gate p{margin:4px 0;font-size:13.6px;}.ds-gate-op{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12.5px;background:#efeee9;border-radius:5px;padding:1px 5px;}.ds-gate pre{margin:6px 0 0;border:1px solid #e2e1da;border-radius:8px;background:#fff;padding:8px;overflow-x:auto;white-space:pre-wrap;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12.2px;}.ds-gate-actions{display:flex;gap:6px;margin-top:8px;}.ds-gate-btn{border:1px solid #191a17;border-radius:8px;background:#191a17;color:#fff;font:inherit;font-size:13.6px;padding:7px 12px;cursor:pointer;}.ds-gate-btn:hover{opacity:.9;}.ds-gate-btn.is-ghost{border-color:#e2e1da;background:transparent;color:#191a17;}.ds-gate-btn.is-ghost:hover{border-color:#191a17;}"
+    },
+    {
+      "name": "Mention Menu",
+      "kind": "custom",
+      "refersTo": null,
+      "description": "The only popover in the system: anchored above the composer, never a modal.",
+      "html": "<div class=\"ds-mention-menu\"><div class=\"ds-mention-head\">Agents in this channel<span class=\"ds-mention-hint\"><kbd>Tab</kbd><kbd>Enter</kbd> pick</span></div><div class=\"ds-mention-options\"><button class=\"ds-mention-option is-active\"><span class=\"ds-mention-name\">Researcher</span><span class=\"ds-mention-handle\">@researcher</span></button><button class=\"ds-mention-option\"><span class=\"ds-mention-name\">Concierge</span><span class=\"ds-mention-handle\">@concierge</span></button></div></div>",
+      "css": ".ds-mention-menu{width:360px;border:1px solid #e2e1da;border-radius:14px;background:#fff;overflow:hidden;color:#191a17;font:400 14.4px/1.45 ui-sans-serif,system-ui,-apple-system,\"Segoe UI\",sans-serif;box-shadow:0 18px 42px rgba(20,20,15,.14), 0 2px 6px rgba(20,20,15,.06);}.ds-mention-head{display:flex;align-items:center;justify-content:space-between;gap:12px;border-bottom:1px solid #e2e1da;padding:9px 14px 8px;color:#6c6f66;font-size:10.6px;letter-spacing:.045em;text-transform:uppercase;}.ds-mention-hint{display:flex;align-items:center;gap:4px;letter-spacing:.02em;text-transform:none;}.ds-mention-hint kbd{border:1px solid #e2e1da;border-bottom-width:2px;border-radius:5px;background:#efeee9;color:#6c6f66;font-family:inherit;font-size:10.2px;padding:1px 5px;}.ds-mention-options{display:grid;gap:2px;padding:6px;max-height:236px;overflow-y:auto;}.ds-mention-option{position:relative;display:flex;align-items:center;gap:10px;border:0;border-radius:9px;background:transparent;color:#191a17;padding:7px 10px 7px 13px;text-align:left;font:inherit;cursor:pointer;}.ds-mention-option:hover{background:#efeee9;}.ds-mention-option.is-active{background:#e3f1e8;}.ds-mention-option.is-active::before{content:\"\";position:absolute;left:0;top:6px;bottom:6px;width:3px;border-radius:3px;background:#1f6f4a;}.ds-mention-name{flex:1;font-weight:600;font-size:13.8px;}.ds-mention-handle{color:#6c6f66;font-size:12.5px;}"
+    },
+    {
+      "name": "Metric Tile",
+      "kind": "card",
+      "refersTo": null,
+      "description": "Sheet tile whose number, not the tile, takes the status hue.",
+      "html": "<div class=\"ds-metrics\"><div class=\"ds-metric\"><span class=\"ds-metric-label\">Running</span><strong class=\"ds-metric-value is-waiting\">3</strong></div><div class=\"ds-metric\"><span class=\"ds-metric-label\">Completed</span><strong class=\"ds-metric-value is-done\">24</strong></div><div class=\"ds-metric\"><span class=\"ds-metric-label\">Failed</span><strong class=\"ds-metric-value is-failed\">1</strong></div></div>",
+      "css": ".ds-metrics{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;}.ds-metric{border:1px solid #e2e1da;border-radius:14px;background:#fff;padding:12px 14px;box-shadow:0 1px 2px rgba(20,20,15,.04), 0 8px 24px rgba(20,20,15,.04);min-width:120px;font:400 14.4px/1.45 ui-sans-serif,system-ui,-apple-system,\"Segoe UI\",sans-serif;}.ds-metric-label{display:block;color:#6c6f66;font-size:10.9px;letter-spacing:.08em;text-transform:uppercase;}.ds-metric-value{display:block;margin-top:2px;font-size:24px;font-weight:700;letter-spacing:-.02em;color:#191a17;}.ds-metric-value.is-done{color:#1f6f4a;}.ds-metric-value.is-waiting{color:#9a6200;}.ds-metric-value.is-failed{color:#a12d24;}"
+    },
+    {
+      "name": "Dashboard Tab",
+      "kind": "nav",
+      "description": "Active tab takes registry green text and a 2px underline on the shared bottom rule.",
+      "html": "<nav class=\"ds-tabs\"><button class=\"ds-tab\">Overview</button><button class=\"ds-tab ds-tab-active\">Executions <span class=\"ds-count\">24</span></button></nav>",
+      "css": ".ds-tabs{display:flex;gap:4px;border-bottom:1px solid #e2e1da;}.ds-tab{appearance:none;border:0;border-bottom:2px solid transparent;background:transparent;color:#6c6f66;font:600 13.6px/1.2 ui-sans-serif,system-ui,-apple-system,\"Segoe UI\",sans-serif;padding:9px 12px;cursor:pointer;}.ds-tab:hover{color:#191a17;}.ds-tab-active{color:#1f6f4a;border-bottom-color:#1f6f4a;}.ds-count{display:inline-block;margin-left:5px;padding:0 6px;border-radius:999px;background:#efeee9;color:#191a17;font-size:11.2px;font-weight:400;}"
+    },
+    {
+      "name": "Sidebar Channel Item",
+      "kind": "nav",
+      "description": "Demo rail navigation; active channel takes the registry wash and 600 weight.",
+      "html": "<nav class=\"ds-chan\"><a class=\"ds-chan-link ds-chan-active\" href=\"#\"><span class=\"ds-hash\">#</span>Ops</a><a class=\"ds-chan-link\" href=\"#\"><span class=\"ds-hash\">#</span>General</a></nav>",
+      "css": ".ds-chan{display:flex;flex-direction:column;gap:2px;width:210px;font:400 14.4px/1.45 ui-sans-serif,system-ui,-apple-system,\"Segoe UI\",sans-serif;}.ds-chan-link{display:flex;align-items:center;gap:7px;border-radius:8px;padding:7px 9px;color:#3c3e38;text-decoration:none;}.ds-chan-link:hover{background:#efeee9;}.ds-chan-active{background:#e3f1e8;color:#1f6f4a;font-weight:600;}.ds-hash{color:#6c6f66;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;}"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Ledger & Ink",
+    "overview": "Two surfaces, one ledger. The demo chat and the embeddable observability dashboard are both entries in a record that someone will later audit: warm paper underneath, neat ruled lines, monospace where precision matters, and a single green ink used to stamp what is authorized, active or complete. The system looks like a working document rather than an application shell, because the product's whole claim is that every execution can be inspected.\n\nRestraint is the aesthetic. Panels are white sheets on vellum with a hairline rule and a shadow so faint it reads as paper thickness, not lift. Status is never color alone: a pill, a rail, a word and a hue say the same thing together. Density is moderate — compact table rows and 9–11px metadata, comfortable 860px message measure — so a developer can scan an execution timeline without leaving the page.\n\nNothing in the system is decorative. There is one accent, one shadow, no gradients, no glass, no illustrated empty states, no webfonts. The surfaces inherit the host's typography stack by design; they must not import an identity that the embedding application did not ask for.",
+    "keyCharacteristics": [
+      "Warm paper canvas, white sheets, hairline rules, no colored fills beyond status washes.",
+      "One accent: registry green, reserved for state and action.",
+      "System sans for prose, system mono for identifiers, arguments, counts and timings.",
+      "Flat by default; depth is tone first, a 4%-alpha shadow second.",
+      "Asymmetric speech bubbles and a 3px status rail are the two recurring silhouettes.",
+      "Zero CSS transitions; motion exists only for live status."
+    ],
+    "rules": [
+      {
+        "name": "The One Stamp Rule",
+        "body": "Registry green may cover at most a pill, a rail, a link, a selected row or a 32px mark. It never fills a panel, a header, a button, or more than a tenth of a screen. Its rarity is what makes \"approved\" legible.",
+        "section": "colors"
+      },
+      {
+        "name": "The Ink Rule",
+        "body": "Primary text is iron gall; grey is for metadata only. Never lighten body copy to create hierarchy — use size, weight or the label treatment instead.",
+        "section": "colors"
+      },
+      {
+        "name": "The Seal-Not-Decoration Rule",
+        "body": "Ochre and red appear only where an execution is waiting or has failed. They are not emphasis colors for buttons, headings or borders.",
+        "section": "colors"
+      },
+      {
+        "name": "The Annotation Rule",
+        "body": "Uppercase tracked type is allowed only at 0.72rem or smaller, and only for a field or state name. The moment a label becomes a sentence, it drops to body case.",
+        "section": "typography"
+      },
+      {
+        "name": "The Comparison Rule",
+        "body": "Anything a reader might diff against another value — id, version, duration, count, argument, timestamp — is set in mono. Prose never uses mono.",
+        "section": "typography"
+      },
+      {
+        "name": "The No-Lift Rule",
+        "body": "Hover, focus and selection never translate, scale or deepen a surface. They change border color, background tone, or text color — nothing moves.",
+        "section": "elevation"
+      }
+    ],
+    "dos": [
+      "Do start every surface on vellum with paper sheets; the largest area is never pure white.",
+      "Do encode status three ways at once — hue, pill text and rail or dot — so a colorblind reader still sees it.",
+      "Do use one solid-ink primary action per view and ghost controls for everything else.",
+      "Do set ids, arguments, versions, timings and usage in mono at 0.64–0.78rem.",
+      "Do keep the sheet shadow at 4% alpha and the radius at 14px for panels, 8px for controls.",
+      "Do make focus visible on inputs with the green border plus 2px wash outline."
+    ],
+    "donts": [
+      "Don't introduce gradients, glass, glow, AI sparkle marks, or a second accent — the world is flat paper and one green stamp.",
+      "Don't build a dark terminal skin or neon status colors; the product is a record, not a console toy.",
+      "Don't reach for Material/Bootstrap chrome: no elevation ladders, no filled cards everywhere, no default button stacks.",
+      "Don't set grey secondary text on the tonal fill: ledger grey on ledger toned measures 4.41:1, below the 4.5 body minimum. Grey belongs on vellum, paper or margin paper.",
+      "Don't use #000, #fff as a page background, or a colored left rail thicker than 3px.",
+      "Don't animate layout, translate or scale on hover; motion is limited to the typing-dot blink and live status arrival.",
+      "Don't add a webfont or a display face; the host's platform stack is the identity.",
+      "Don't put registry green on a large area, a header band, or a primary button."
+    ]
+  }
+}
