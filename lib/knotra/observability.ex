@@ -67,7 +67,10 @@ defmodule Knotra.Observability do
   @spec snapshot(instance(), keyword()) :: {:ok, map()} | {:error, :not_found}
   def snapshot(instance, opts \\ []), do: call(instance, {:snapshot, opts})
 
-  @doc "Execution summaries, newest first. Each summary omits the event timeline."
+  @doc """
+  Execution summaries, newest first. Each summary omits the event timeline and
+  includes `:timings` (total run, turn, model, and tool duration aggregates).
+  """
   @spec executions(instance()) :: {:ok, [map()]} | {:error, :not_found}
   def executions(instance) do
     with {:ok, snapshot} <- snapshot(instance), do: {:ok, snapshot.executions}

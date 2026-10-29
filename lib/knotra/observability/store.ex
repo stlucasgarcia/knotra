@@ -121,6 +121,7 @@ defmodule Knotra.Observability.Store do
           |> Map.put(:events, events)
           |> Map.put(:duration_ms, max(finish - record.started_at, 0))
           |> Map.put(:truncated?, record.event_count > record.retained_events)
+          |> Map.put(:timings, Knotra.Observability.Timing.summarize(events))
 
         {:reply, {:ok, record}, state}
 

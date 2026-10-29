@@ -196,6 +196,8 @@ defmodule KnotraBotsTest do
     assert detail =~ "Timeline"
     assert detail =~ "Observable received: observability check"
     assert detail =~ "ChatFake"
+    assert detail =~ "Turn timings"
+    assert detail =~ "Run total"
   end
 
   test "a concierge handoff becomes a researcher lookup that runs without a human gate",

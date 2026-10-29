@@ -188,7 +188,8 @@ the agents that have run, their models and tools, live and completed executions,
 the conversation topology across handoffs, and a message feed spanning every
 execution. Select an execution to inspect its full timeline: input, model
 requests and replies, tool calls and results, clarification and approval gates,
-usage, and terminal errors.
+usage, and terminal errors. The detail pane reports the total run duration and a
+per-turn table with model latency, tool time, other overhead, and call counts.
 
 Every chat submission annotates its durable execution with the agent name,
 channel, conversation root, hop, and message id, so handoffs appear as connected

@@ -104,8 +104,9 @@ The dashboard has five surfaces:
 
 - **Overview** - counters, active executions, agent definitions and their models,
   and the newest messages.
-- **Executions** - filterable table with status, agent, model, duration, counters,
-  and input; selecting a row opens the full event timeline.
+- **Executions** - filterable table with status, agent, model, total run duration,
+  last-turn duration, counters, and input; selecting a row opens the full event
+  timeline, per-turn timings, and run totals.
 - **Agents** - definitions aggregated by version, with model, tools, loop, tool
   runtime, observer, run counts, and execution links.
 - **Topology** - conversations ordered oldest-first, agent-to-agent handoffs, and
@@ -143,6 +144,12 @@ Knotra.Observability.link(MyApp.Agents, parent_id, child_id, label: "handoff")
 edge; `agent` overrides the definition version as the display label; `labels`
 are shown in the execution detail. Topology derives agent-to-agent edges from
 both explicit links and consecutive executions sharing a conversation.
+
+Each execution summary includes a `timings` map: `total_ms`, `turn_count`,
+`last_turn_ms`, `avg_turn_ms`, `slowest_turn_ms`, `model_ms`, and `tool_ms`.
+`Knotra.Observability.execution/2` additionally returns the per-turn rows: turn
+number, wall duration, model latency, completed tool time, other overhead, tool
+call count, and reported usage.
 
 The same data is available without LiveView:
 

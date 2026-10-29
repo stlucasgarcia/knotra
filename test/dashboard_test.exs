@@ -14,6 +14,47 @@ if Code.ensure_loaded?(Knotra.Dashboard.Live) do
       end
     end
 
+    defmodule ToolModel do
+      @behaviour Knotra.Model
+
+      @impl true
+      def call(%{exchanges: []}, _opts) do
+        {:ok,
+         %Knotra.Reply{
+           calls: [
+             %{id: "call-1", name: "lookup", arguments: %{"query" => "ord-1"}}
+           ]
+         }}
+      end
+
+      def call(%{exchanges: [%{results: [_]}]}, _opts) do
+        {:ok, %Knotra.Reply{text: "lookup finished"}}
+      end
+    end
+
+    defmodule Lookup do
+      @behaviour Knotra.Tool
+
+      @impl true
+      def definition do
+        %{
+          name: "lookup",
+          description: "Look up an order",
+          read_only: true,
+          parameters: %{"type" => "object", "properties" => %{}}
+        }
+      end
+
+      @impl true
+      def validate(args), do: {:ok, args}
+
+      @impl true
+      def authorize(_args, _scope), do: :ok
+
+      @impl true
+      def call(%{"query" => query}, _scope), do: {:ok, "result for " <> query}
+    end
+
     setup do
       instance = :"knotra_dash_#{System.unique_integer([:positive])}"
 
@@ -55,6 +96,7 @@ if Code.ensure_loaded?(Knotra.Dashboard.Live) do
       executions = render(socket)
       assert executions =~ "hello dashboard"
       assert executions =~ "dash-agent"
+      assert executions =~ "Last turn"
 
       {:noreply, socket} = Live.handle_event("tab", %{"tab" => "agents"}, socket)
       agents = render(socket)
@@ -88,9 +130,38 @@ if Code.ensure_loaded?(Knotra.Dashboard.Live) do
       assert detail =~ "Input"
       assert detail =~ "completed"
       assert detail =~ "dash-v1"
+      assert detail =~ "Turn timings"
+      assert detail =~ "Run total"
+      assert detail =~ "Last turn"
 
       {:noreply, socket} = Live.handle_event("close", %{}, socket)
       assert socket.assigns.selected == nil
+    end
+
+    test "renders tool call and tool result events", context do
+      definition = %Definition{
+        version: "tool-dash-v1",
+        model: {ToolModel, []},
+        tools: [Lookup]
+      }
+
+      assert {:ok, pid} = Knotra.start(context.instance, definition, "lookup ord-1", %{})
+      assert %{status: :completed} = await(pid)
+      Knotra.Observability.sync(context.instance)
+
+      execution_id = Knotra.snapshot(pid).id
+
+      {:ok, socket} = mount(context.instance)
+
+      {:noreply, socket} =
+        Live.handle_event("select", %{"id" => to_string(execution_id)}, socket)
+
+      html = render(socket)
+      assert html =~ "tool call"
+      assert html =~ "tool result"
+      assert html =~ "lookup"
+      assert html =~ "result for ord-1"
+      assert html =~ "lookup finished"
     end
 
     test "filters executions and messages", context do

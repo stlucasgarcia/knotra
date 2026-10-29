@@ -66,6 +66,9 @@ defmodule Knotra.ObservabilityTest do
     assert summary.trace.agent == "greeter"
     assert summary.event_count >= 4
     assert summary.duration_ms >= 0
+    assert summary.timings.turn_count == 1
+    assert summary.timings.last_turn_ms >= 0
+    assert is_integer(summary.timings.total_ms)
 
     assert {:ok, detail} = Knotra.Observability.execution(instance, execution.id)
 
@@ -78,6 +81,12 @@ defmodule Knotra.ObservabilityTest do
 
     assert detail.events |> List.first() |> Map.get(:sequence) == 1
     assert detail.output == "echo: hello observability"
+    assert detail.timings.turn_count == 1
+    assert detail.timings.total_ms >= 0
+    assert [turn] = detail.timings.turns
+    assert turn.number == 1
+    assert turn.duration_ms >= turn.model_ms
+    assert summary.timings.last_turn_ms == turn.duration_ms
 
     assert {:ok, messages} = Knotra.Observability.messages(instance)
     assert Enum.any?(messages, &(&1.kind == :input and &1.text == "hello observability"))

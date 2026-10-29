@@ -31,10 +31,13 @@ defmodule Knotra.Observability.Snapshot do
   end
 
   def summary(record) do
+    timings = Knotra.Observability.Timing.summary(Enum.reverse(record.events))
+
     record
     |> Map.drop([:events])
     |> Map.put(:duration_ms, duration_ms(record))
     |> Map.put(:truncated?, record.event_count > record.retained_events)
+    |> Map.put(:timings, timings)
   end
 
   defp stats(records, agents) do

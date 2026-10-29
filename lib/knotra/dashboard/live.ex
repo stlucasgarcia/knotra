@@ -32,101 +32,87 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
 
     @css """
     .knotra {
-      color-scheme: light dark;
-      --k-bg: #f7f8fa;
+      color-scheme: light;
+      --k-bg: #f7f6f2;
       --k-panel: #ffffff;
-      --k-panel-2: #f1f3f7;
-      --k-border: #e2e6ee;
-      --k-text: #18202b;
-      --k-muted: #697586;
-      --k-accent: #4f46e5;
-      --k-accent-soft: #eef0ff;
-      --k-green: #07875f;
-      --k-green-soft: #e5f7ef;
-      --k-amber: #a15c00;
-      --k-amber-soft: #fff4de;
-      --k-red: #b42318;
-      --k-red-soft: #fdecea;
+      --k-panel-2: #efeee9;
+      --k-border: #e2e1da;
+      --k-text: #191a17;
+      --k-muted: #6c6f66;
+      --k-accent: #1f6f4a;
+      --k-accent-soft: #e3f1e8;
+      --k-green: #1f6f4a;
+      --k-green-soft: #e3f1e8;
+      --k-amber: #9a6200;
+      --k-amber-soft: #fff8e6;
+      --k-red: #a12d24;
+      --k-red-soft: #fbeae7;
+      --k-shadow: 0 1px 2px rgba(20, 20, 15, 0.04), 0 8px 24px rgba(20, 20, 15, 0.04);
       --k-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
       background: var(--k-bg);
       color: var(--k-text);
       font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-      font-size: 14px;
+      font-size: 0.9rem;
       line-height: 1.45;
-      padding: 20px;
-      border-radius: 12px;
-    }
-    @media (prefers-color-scheme: dark) {
-      .knotra {
-        --k-bg: #0d1117;
-        --k-panel: #151b24;
-        --k-panel-2: #1a222d;
-        --k-border: #2a3542;
-        --k-text: #e6edf3;
-        --k-muted: #8b98a9;
-        --k-accent: #8b8cf8;
-        --k-accent-soft: #23264a;
-        --k-green: #3ddc97;
-        --k-green-soft: #112c22;
-        --k-amber: #f2b544;
-        --k-amber-soft: #33260d;
-        --k-red: #ff7b72;
-        --k-red-soft: #38191a;
-      }
+      padding: 24px 28px 40px;
     }
     .knotra *, .knotra *::before, .knotra *::after { box-sizing: border-box; }
     .knotra h1, .knotra h2, .knotra h3, .knotra p { margin: 0; }
-    .knotra code, .knotra pre, .knotra .kid { font-family: var(--k-mono); font-size: 12px; }
-    .knotra code, .knotra pre { background: transparent; color: inherit; padding: 0; border: 0; }
-    .knotra pre { white-space: pre-wrap; word-break: break-word; margin: 6px 0 0; }
-    .k-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
-    .k-brand { display: flex; align-items: center; gap: 12px; }
+    .knotra code, .knotra pre, .knotra .kid { font-family: var(--k-mono); font-size: 0.78rem; }
+    .knotra code { background: var(--k-panel-2); color: var(--k-text); padding: 1px 5px; border-radius: 5px; }
+    .knotra pre { background: transparent; color: inherit; padding: 0; border: 0; white-space: pre-wrap; word-break: break-word; margin: 6px 0 0; }
+    .k-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; flex-wrap: wrap; padding-bottom: 14px; border-bottom: 1px solid var(--k-border); }
+    .k-brand { display: flex; align-items: center; gap: 10px; }
     .k-mark {
-      display: grid; place-items: center; width: 38px; height: 38px; border-radius: 10px;
-      background: var(--k-accent); color: #fff; font-weight: 700; font-size: 18px;
+      display: grid; place-items: center; width: 30px; height: 30px; border-radius: 9px;
+      background: var(--k-text); color: #fff; font-weight: 650; font-size: 0.85rem;
     }
-    .k-brand h1 { font-size: 18px; letter-spacing: -0.01em; }
-    .k-brand p { display: flex; gap: 10px; align-items: center; color: var(--k-muted); font-size: 12px; margin-top: 2px; }
+    .k-brand h1 { font-size: 1.15rem; font-weight: 650; letter-spacing: -0.01em; }
+    .k-brand p { display: flex; gap: 10px; align-items: center; color: var(--k-muted); font-size: 0.78rem; margin-top: 2px; }
     .k-instance { font-family: var(--k-mono); }
     .k-actions { display: flex; align-items: center; gap: 8px; }
-    .k-live { display: inline-flex; align-items: center; gap: 6px; color: var(--k-green); font-size: 12px; font-weight: 600; }
-    .k-live-dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 18%, transparent); }
+    .k-live { display: inline-flex; align-items: center; gap: 6px; color: var(--k-accent); font-size: 0.78rem; font-weight: 600; }
+    .k-live-dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
     .k-live.is-paused { color: var(--k-muted); }
     .k-btn, .k-link, .k-icon-btn {
-      appearance: none; border: 1px solid var(--k-border); background: var(--k-panel); color: var(--k-text);
-      border-radius: 8px; padding: 6px 10px; font: inherit; font-size: 12px; cursor: pointer;
+      appearance: none; background: var(--k-text); border: 1px solid var(--k-text); color: #fff;
+      border-radius: 8px; padding: 0.5rem 0.9rem; font: inherit; font-size: 0.85rem; cursor: pointer;
     }
-    .k-btn:hover, .k-link:hover, .k-icon-btn:hover { border-color: var(--k-accent); color: var(--k-accent); }
-    .k-link { border: 0; background: transparent; padding: 2px 4px; color: var(--k-accent); }
-    .k-icon-btn { border: 0; font-size: 20px; line-height: 1; padding: 2px 8px; }
+    .k-btn:hover { opacity: 0.9; }
+    .k-btn.is-ghost { background: transparent; color: var(--k-text); border-color: var(--k-border); }
+    .k-btn.is-ghost:hover { border-color: var(--k-text); color: var(--k-text); opacity: 1; }
+    .k-link { border: 0; background: transparent; color: var(--k-accent); padding: 2px 4px; font-size: 0.78rem; }
+    .k-link:hover { opacity: 0.75; }
+    .k-icon-btn { border: 0; background: transparent; color: var(--k-muted); font-size: 1.25rem; line-height: 1; padding: 2px 8px; }
+    .k-icon-btn:hover { color: var(--k-text); opacity: 1; }
     .k-error-inline { color: var(--k-red); }
-    .k-tabs { display: flex; gap: 4px; margin: 18px 0 14px; border-bottom: 1px solid var(--k-border); overflow-x: auto; }
+    .k-tabs { display: flex; gap: 4px; margin: 16px 0 14px; border-bottom: 1px solid var(--k-border); overflow-x: auto; }
     .k-tab {
       appearance: none; background: transparent; border: 0; border-bottom: 2px solid transparent;
-      color: var(--k-muted); font: inherit; font-weight: 600; font-size: 13px; padding: 9px 12px;
+      color: var(--k-muted); font: inherit; font-weight: 600; font-size: 0.85rem; padding: 9px 12px;
       cursor: pointer; white-space: nowrap;
     }
     .k-tab:hover { color: var(--k-text); }
     .k-tab.is-active { color: var(--k-accent); border-bottom-color: var(--k-accent); }
-    .k-count { display: inline-block; margin-left: 5px; padding: 0 6px; border-radius: 999px; background: var(--k-panel-2); font-size: 11px; }
+    .k-count { display: inline-block; margin-left: 5px; padding: 0 6px; border-radius: 999px; background: var(--k-panel-2); font-size: 0.7rem; }
     .k-body { display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; }
     .k-body:has(.k-detail) { grid-template-columns: minmax(0, 1fr) minmax(330px, 420px); }
     @media (max-width: 980px) { .k-body:has(.k-detail) { grid-template-columns: minmax(0, 1fr); } }
     .k-main { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
-    .k-panel { background: var(--k-panel); border: 1px solid var(--k-border); border-radius: 12px; padding: 14px; min-width: 0; }
+    .k-panel { background: var(--k-panel); border: 1px solid var(--k-border); border-radius: 14px; padding: 16px; min-width: 0; box-shadow: var(--k-shadow); }
     .k-panel-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
-    .k-panel-head h2 { font-size: 14px; letter-spacing: -0.01em; }
-    .k-muted { color: var(--k-muted); font-size: 12px; }
-    .k-empty { color: var(--k-muted); font-size: 13px; padding: 14px 4px; }
+    .k-panel-head h2 { font-size: 0.95rem; letter-spacing: -0.01em; }
+    .k-muted { color: var(--k-muted); font-size: 0.78rem; }
+    .k-empty { color: var(--k-muted); font-size: 0.85rem; padding: 14px 4px; }
     .k-metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; }
-    .k-metric { background: var(--k-panel); border: 1px solid var(--k-border); border-radius: 12px; padding: 12px; }
-    .k-metric span { display: block; color: var(--k-muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; }
-    .k-metric strong { display: block; font-size: 24px; letter-spacing: -0.02em; margin-top: 2px; }
+    .k-metric { background: var(--k-panel); border: 1px solid var(--k-border); border-radius: 14px; padding: 12px 14px; box-shadow: var(--k-shadow); }
+    .k-metric span { display: block; color: var(--k-muted); font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.08em; }
+    .k-metric strong { display: block; font-size: 1.5rem; letter-spacing: -0.02em; margin-top: 2px; }
     .k-metric.is-running strong { color: var(--k-green); }
     .k-metric.is-waiting strong { color: var(--k-amber); }
     .k-metric.is-completed strong { color: var(--k-accent); }
     .k-metric.is-failed strong { color: var(--k-red); }
-    .k-grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; }
+    .k-grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; align-items: start; }
     .k-list { display: flex; flex-direction: column; gap: 6px; }
     .k-row-card {
       display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 12px;
@@ -136,27 +122,27 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
     .k-row-card:hover { border-color: var(--k-accent); }
     .k-row-card.is-selected { border-color: var(--k-accent); background: var(--k-accent-soft); }
     .k-row-main { display: flex; flex-direction: column; min-width: 0; }
-    .k-row-main strong { font-size: 13px; }
-    .k-row-main span { color: var(--k-muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .k-row-side { display: flex; flex-direction: column; align-items: flex-end; gap: 1px; color: var(--k-muted); font-size: 11px; }
+    .k-row-main strong { font-size: 0.85rem; }
+    .k-row-main span { color: var(--k-muted); font-size: 0.78rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .k-row-side { display: flex; flex-direction: column; align-items: flex-end; gap: 1px; color: var(--k-muted); font-size: 0.7rem; }
     .k-row-side code { color: var(--k-text); }
-    .k-badge { display: inline-flex; align-items: center; gap: 5px; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; background: var(--k-panel-2); }
-    .k-badge-dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
-    .k-badge.is-running { color: var(--k-green); background: var(--k-green-soft); }
+    .k-badge { display: inline-flex; align-items: center; gap: 4px; padding: 2px 7px; border-radius: 999px; font-size: 0.68rem; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; background: var(--k-panel-2); }
+    .k-badge-dot { width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+    .k-badge.is-running { color: var(--k-amber); background: var(--k-amber-soft); }
     .k-badge.is-waiting { color: var(--k-amber); background: var(--k-amber-soft); }
     .k-badge.is-completed { color: var(--k-accent); background: var(--k-accent-soft); }
     .k-badge.is-failed { color: var(--k-red); background: var(--k-red-soft); }
     .k-filter { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; margin-bottom: 12px; }
-    .k-filter label { display: flex; flex-direction: column; gap: 4px; font-size: 11px; color: var(--k-muted); }
+    .k-filter label { display: flex; flex-direction: column; gap: 4px; font-size: 0.7rem; color: var(--k-muted); }
     .k-filter .k-grow { flex: 1; min-width: 180px; }
     .k-filter select, .k-filter input {
-      appearance: none; border: 1px solid var(--k-border); background: var(--k-panel-2); color: var(--k-text);
-      border-radius: 8px; padding: 7px 9px; font: inherit; font-size: 12px; width: 100%;
+      appearance: none; border: 1px solid var(--k-border); background: var(--k-panel); color: var(--k-text);
+      border-radius: 8px; padding: 0.5rem 0.6rem; font: inherit; font-size: 0.82rem; width: 100%;
     }
     .k-filter input:focus, .k-filter select:focus { outline: 2px solid var(--k-accent-soft); border-color: var(--k-accent); }
     .k-table-wrap { overflow-x: auto; }
-    .k-table { width: 100%; border-collapse: collapse; font-size: 12px; }
-    .k-table th { text-align: left; color: var(--k-muted); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.03em; padding: 6px 8px; border-bottom: 1px solid var(--k-border); }
+    .k-table { width: 100%; border-collapse: collapse; font-size: 0.78rem; }
+    .k-table th { text-align: left; color: var(--k-muted); font-weight: 600; font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.05em; padding: 6px 8px; border-bottom: 1px solid var(--k-border); }
     .k-table td { padding: 8px; border-bottom: 1px solid var(--k-border); vertical-align: middle; }
     .k-row { cursor: pointer; }
     .k-row:hover td { background: var(--k-panel-2); }
@@ -165,26 +151,26 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
     .k-preview { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--k-muted); }
     .k-arrow-cell { color: var(--k-muted); }
     .k-agents { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; }
-    .k-agent-card { border: 1px solid var(--k-border); border-radius: 10px; padding: 12px; background: var(--k-panel-2); min-width: 0; }
+    .k-agent-card { border: 1px solid var(--k-border); border-radius: 14px; padding: 14px; background: var(--k-panel); min-width: 0; box-shadow: var(--k-shadow); }
     .k-agent-card > header { display: flex; justify-content: space-between; gap: 10px; align-items: flex-start; }
-    .k-agent-card h3 { font-size: 14px; }
+    .k-agent-card h3 { font-size: 0.95rem; }
     .k-agent-card header code { color: var(--k-muted); }
-    .k-agent-stub { display: flex; flex-direction: column; gap: 2px; padding: 9px 10px; border: 1px solid var(--k-border); border-radius: 9px; background: var(--k-panel-2); }
-    .k-agent-stub strong { font-size: 13px; }
+    .k-agent-stub { display: flex; flex-direction: column; gap: 2px; padding: 9px 10px; border: 1px solid var(--k-border); border-radius: 10px; background: var(--k-panel-2); }
+    .k-agent-stub strong { font-size: 0.85rem; }
     .k-agent-list { display: flex; flex-direction: column; gap: 6px; }
     .k-facts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; margin: 12px 0; }
     .k-facts.is-inline { grid-template-columns: repeat(6, minmax(0, 1fr)); }
-    .k-facts div { background: var(--k-panel); border: 1px solid var(--k-border); border-radius: 8px; padding: 6px 8px; min-width: 0; }
-    .k-facts dt { color: var(--k-muted); font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em; }
-    .k-facts dd { margin: 1px 0 0; font-weight: 700; font-size: 14px; overflow-wrap: anywhere; }
+    .k-facts div { background: var(--k-panel-2); border: 1px solid var(--k-border); border-radius: 9px; padding: 6px 8px; min-width: 0; }
+    .k-facts dt { color: var(--k-muted); font-size: 0.6rem; text-transform: uppercase; letter-spacing: 0.06em; }
+    .k-facts dd { margin: 1px 0 0; font-weight: 700; font-size: 0.88rem; overflow-wrap: anywhere; }
     .k-facts dd code { font-weight: 400; }
     .k-chips { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 8px; }
-    .k-chip { display: inline-block; padding: 2px 7px; border-radius: 999px; border: 1px solid var(--k-border); background: var(--k-panel); color: var(--k-muted); font-size: 11px; }
+    .k-chip { display: inline-block; padding: 2px 7px; border-radius: 999px; border: 1px solid var(--k-border); background: var(--k-panel); color: var(--k-muted); font-size: 0.7rem; }
     .k-chip.is-muted { opacity: 0.7; }
     .k-chip.is-link { cursor: pointer; font-family: var(--k-mono); }
     .k-chip.is-link:hover, .k-chip.is-selected { border-color: var(--k-accent); color: var(--k-accent); }
     .k-flows { display: flex; flex-direction: column; gap: 10px; }
-    .k-flow-card { border: 1px solid var(--k-border); border-radius: 10px; background: var(--k-panel-2); padding: 10px 12px; }
+    .k-flow-card { border: 1px solid var(--k-border); border-radius: 14px; background: var(--k-panel); padding: 12px 14px; box-shadow: var(--k-shadow); }
     .k-flow-card > header { display: flex; justify-content: space-between; gap: 10px; margin-bottom: 10px; }
     .k-flow { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
     .k-flow-step { display: inline-flex; align-items: center; gap: 6px; }
@@ -192,65 +178,66 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
     .k-node {
       display: flex; flex-direction: column; align-items: flex-start; gap: 1px; min-width: 120px;
       border: 1px solid var(--k-border); border-left: 3px solid var(--k-border); background: var(--k-panel);
-      color: inherit; border-radius: 8px; padding: 6px 9px; font: inherit; cursor: pointer; text-align: left;
+      color: inherit; border-radius: 9px; padding: 6px 9px; font: inherit; cursor: pointer; text-align: left;
     }
     .k-node:hover { border-color: var(--k-accent); }
-    .k-node strong { font-size: 12px; }
-    .k-node span { font-family: var(--k-mono); font-size: 10px; color: var(--k-muted); }
-    .k-node em { font-style: normal; font-size: 10px; color: var(--k-muted); }
-    .k-node.running { border-left-color: var(--k-green); }
+    .k-node strong { font-size: 0.78rem; }
+    .k-node span { font-family: var(--k-mono); font-size: 0.64rem; color: var(--k-muted); }
+    .k-node em { font-style: normal; font-size: 0.64rem; color: var(--k-muted); }
+    .k-node.running { border-left-color: var(--k-amber); }
     .k-node.waiting { border-left-color: var(--k-amber); }
     .k-node.completed { border-left-color: var(--k-accent); }
     .k-node.failed { border-left-color: var(--k-red); }
     .k-links { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
     .k-links li { display: flex; align-items: center; gap: 6px; }
     .k-feed { display: flex; flex-direction: column; gap: 8px; }
-    .k-feed.is-compact .k-msg p { font-size: 12px; }
-    .k-msg { border: 1px solid var(--k-border); border-left: 3px solid var(--k-border); border-radius: 9px; padding: 8px 10px; background: var(--k-panel-2); }
+    .k-feed.is-compact .k-msg p { display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; font-size: 0.8rem; }
+    .k-msg { border: 1px solid var(--k-border); border-left: 3px solid var(--k-border); border-radius: 10px; padding: 9px 11px; background: var(--k-panel); box-shadow: var(--k-shadow); }
     .k-msg.is-assistant { border-left-color: var(--k-accent); }
     .k-msg.is-tool { border-left-color: var(--k-green); }
     .k-msg.is-input { border-left-color: var(--k-muted); }
     .k-msg.is-human { border-left-color: var(--k-amber); }
     .k-msg.is-error { border-left-color: var(--k-red); }
-    .k-msg header { display: flex; gap: 7px; align-items: center; flex-wrap: wrap; font-size: 11px; }
-    .k-msg header strong { font-size: 12px; }
-    .k-msg p { margin-top: 4px; font-size: 13px; white-space: pre-wrap; overflow-wrap: anywhere; }
-    .k-kind { padding: 1px 6px; border-radius: 999px; background: var(--k-panel); font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em; }
+    .k-msg header { display: flex; gap: 7px; align-items: center; flex-wrap: wrap; font-size: 0.7rem; }
+    .k-msg header strong { font-size: 0.8rem; }
+    .k-msg p { margin-top: 4px; font-size: 0.85rem; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .k-kind { padding: 1px 6px; border-radius: 999px; background: var(--k-panel-2); font-size: 0.62rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; }
     .k-detail {
-      background: var(--k-panel); border: 1px solid var(--k-border); border-radius: 12px; padding: 14px;
+      background: var(--k-panel); border: 1px solid var(--k-border); border-radius: 14px; padding: 16px;
       position: sticky; top: 14px; max-height: calc(100vh - 28px); overflow: auto; min-width: 0;
+      box-shadow: var(--k-shadow);
     }
     .k-detail-head { display: flex; justify-content: space-between; gap: 10px; align-items: flex-start; }
-    .k-detail-head h2 { font-size: 16px; margin-top: 1px; }
-    .k-eyebrow { color: var(--k-muted); font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; }
-    .k-detail-meta { display: flex; flex-direction: column; gap: 3px; margin: 10px 0; font-size: 12px; }
+    .k-detail-head h2 { font-size: 1rem; margin-top: 1px; }
+    .k-eyebrow { color: var(--k-muted); font-size: 0.62rem; text-transform: uppercase; letter-spacing: 0.1em; }
+    .k-detail-meta { display: flex; flex-direction: column; align-items: flex-start; gap: 3px; margin: 10px 0; font-size: 0.78rem; }
     .k-trace { display: flex; flex-direction: column; gap: 3px; margin: 8px 0 12px; }
-    .k-trace div { display: flex; gap: 8px; font-size: 11px; }
+    .k-trace div { display: flex; gap: 8px; font-size: 0.7rem; }
     .k-trace span { color: var(--k-muted); min-width: 84px; }
     .k-trace code { overflow-wrap: anywhere; }
-    .k-callout { border-radius: 9px; border: 1px solid var(--k-border); padding: 8px 10px; margin: 8px 0; background: var(--k-panel-2); }
-    .k-callout strong { font-size: 12px; }
-    .k-callout p { margin-top: 3px; font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .k-callout { border-radius: 10px; border: 1px solid var(--k-border); padding: 9px 11px; margin: 8px 0; background: var(--k-panel-2); }
+    .k-callout strong { font-size: 0.78rem; }
+    .k-callout p { margin-top: 3px; font-size: 0.78rem; white-space: pre-wrap; overflow-wrap: anywhere; }
     .k-callout.is-warn { border-color: var(--k-amber); background: var(--k-amber-soft); }
-    .k-callout.is-ok { border-color: var(--k-green); background: var(--k-green-soft); }
+    .k-callout.is-ok { border-color: var(--k-accent); background: var(--k-accent-soft); }
     .k-callout.is-error { border-color: var(--k-red); background: var(--k-red-soft); }
-    .k-section-title { display: flex; justify-content: space-between; gap: 8px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--k-muted); margin: 14px 0 6px; }
-    .k-input { background: var(--k-panel-2); border-radius: 8px; padding: 8px 10px; font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .k-section-title { display: flex; justify-content: space-between; gap: 8px; font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--k-muted); margin: 14px 0 6px; }
+    .k-input { background: var(--k-panel-2); border: 1px solid var(--k-border); border-radius: 9px; padding: 8px 10px; font-size: 0.78rem; white-space: pre-wrap; overflow-wrap: anywhere; }
     .k-timeline { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 7px; }
-    .k-event { border-left: 2px solid var(--k-border); padding: 2px 0 2px 10px; }
+    .k-event { background: var(--k-panel); border: 1px solid var(--k-border); border-left: 3px solid var(--k-border); border-radius: 10px; padding: 7px 10px; box-shadow: 0 1px 2px rgba(20, 20, 15, 0.03); }
     .k-event.is-input { border-left-color: var(--k-muted); }
     .k-event.is-model, .k-event.is-assistant { border-left-color: var(--k-accent); }
-    .k-event.is-tool { border-left-color: var(--k-green); }
+    .k-event.is-tool { border-left-color: var(--k-accent); }
     .k-event.is-human { border-left-color: var(--k-amber); }
-    .k-event.is-terminal.is-completed { border-left-color: var(--k-green); }
+    .k-event.is-terminal.is-completed { border-left-color: var(--k-accent); }
     .k-event.is-terminal.is-failed, .k-event.is-terminal.is-blocked, .k-event.is-terminal.is-cancelled { border-left-color: var(--k-red); }
-    .k-event-head { display: flex; align-items: center; gap: 7px; font-size: 11px; }
-    .k-event-head strong { font-size: 11px; }
-    .k-seq { display: inline-grid; place-items: center; min-width: 20px; height: 18px; border-radius: 5px; background: var(--k-panel-2); font-family: var(--k-mono); font-size: 10px; color: var(--k-muted); }
-    .k-event p, .k-event pre { font-size: 12px; margin-top: 3px; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .k-event-head { display: flex; align-items: center; gap: 7px; font-size: 0.7rem; }
+    .k-event-head strong { font-size: 0.7rem; }
+    .k-seq { display: inline-grid; place-items: center; min-width: 20px; height: 18px; border-radius: 5px; background: var(--k-panel-2); font-family: var(--k-mono); font-size: 0.62rem; color: var(--k-muted); }
+    .k-event p, .k-event pre { font-size: 0.78rem; margin-top: 3px; white-space: pre-wrap; overflow-wrap: anywhere; }
     .k-calls { list-style: none; margin: 5px 0 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
     .k-calls li { display: flex; gap: 6px; flex-wrap: wrap; background: var(--k-panel-2); border-radius: 6px; padding: 4px 6px; }
-    .k-calls span { font-family: var(--k-mono); font-size: 11px; color: var(--k-muted); }
+    .k-calls span { font-family: var(--k-mono); font-size: 0.7rem; color: var(--k-muted); }
     .k-usage { font-family: var(--k-mono); }
     """
 
@@ -419,7 +406,7 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
               <span class="k-live-dot"></span>{if @paused, do: "Paused", else: "Live"}
             </span>
             <button class="k-btn" phx-click="toggle_pause">{if @paused, do: "Resume", else: "Pause"}</button>
-            <button class="k-btn" phx-click="refresh">Refresh</button>
+            <button class="k-btn is-ghost" phx-click="refresh">Refresh</button>
           </div>
         </header>
 
@@ -593,6 +580,7 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
                 <th>Execution</th>
                 <th>Started</th>
                 <th>Duration</th>
+                <th>Last turn</th>
                 <th>Turns / tools</th>
                 <th>Input</th>
               </tr>
@@ -610,6 +598,7 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
                 <td><code class="kid">{short_id(execution.id)}</code></td>
                 <td>{format_clock(execution.started_at)}</td>
                 <td>{format_duration(execution.duration_ms)}</td>
+                <td>{format_duration(execution.timings.last_turn_ms)}</td>
                 <td>{execution.counts.turns} / {execution.counts.tools}</td>
                 <td class="k-preview">{truncate(format_text(execution.input), 64)}</td>
               </tr>
@@ -782,17 +771,60 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
       <div class="k-detail-meta">
         <.status_badge status={@selected.status} />
         <span><strong>{agent_label(@selected)}</strong> · {model_label(@selected)}</span>
-        <span>{format_duration(@selected.duration_ms)} · started {format_clock(@selected.started_at)}</span>
+        <span>{format_duration(@selected.duration_ms)} total · started {format_clock(@selected.started_at)}</span>
+        <span>
+          {@selected.timings.turn_count} turn(s) · last {format_duration(@selected.timings.last_turn_ms)} ·
+          avg {format_duration(@selected.timings.avg_turn_ms)}
+        </span>
       </div>
 
       <dl class="k-facts">
         <div><dt>Version</dt><dd><code>{@selected.definition.version}</code></dd></div>
-        <div><dt>Turns</dt><dd>{@selected.counts.turns}</dd></div>
-        <div><dt>Tools</dt><dd>{@selected.counts.tools}</dd></div>
+        <div><dt>Run total</dt><dd>{format_duration(@selected.timings.total_ms)}</dd></div>
+        <div><dt>Last turn</dt><dd>{format_duration(@selected.timings.last_turn_ms)}</dd></div>
+        <div><dt>Model time</dt><dd>{format_duration(@selected.timings.model_ms)}</dd></div>
+        <div><dt>Tool time</dt><dd>{format_duration(@selected.timings.tool_ms)}</dd></div>
         <div><dt>Retries</dt><dd>{@selected.counts.retries}</dd></div>
         <div><dt>Steps</dt><dd>{@selected.counts.steps}</dd></div>
         <div><dt>Events</dt><dd>{@selected.event_count}</dd></div>
+        <div><dt>Tools</dt><dd>{@selected.counts.tools}</dd></div>
       </dl>
+
+      <h3 class="k-section-title">
+        Turn timings
+        <span class="k-muted">
+          {if @selected.truncated?, do: "partial timeline · ", else: ""}wall time per model turn
+        </span>
+      </h3>
+
+      <p :if={@selected.timings.turn_count == 0} class="k-muted">
+        No model turns recorded.
+      </p>
+
+      <div :if={@selected.timings.turn_count > 0} class="k-table-wrap">
+        <table class="k-table k-turn-table">
+          <thead>
+            <tr>
+              <th>Turn</th>
+              <th>Total</th>
+              <th>Model</th>
+              <th>Tools</th>
+              <th>Other</th>
+              <th>Calls</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr :for={turn <- @selected.timings.turns}>
+              <td>{turn.number}</td>
+              <td>{format_duration(turn.duration_ms)}</td>
+              <td>{format_duration(turn.model_ms)}</td>
+              <td>{format_duration(turn.tool_ms)}</td>
+              <td>{format_duration(turn.other_ms)}</td>
+              <td>{turn.tools}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
 
       <div class="k-trace">
         <div :if={@selected.trace.conversation_id}>
@@ -893,6 +925,9 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
         <span class="k-row-side">
           <code>{model_label(@execution)}</code>
           <span>{format_duration(@execution.duration_ms)} · {short_id(@execution.id)}</span>
+          <span>
+            {@execution.timings.turn_count} turns · last {format_duration(@execution.timings.last_turn_ms)}
+          </span>
         </span>
       </button>
       """
@@ -1039,11 +1074,12 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
     end
 
     defp event_card(%{event: %{type: :tool_result}} = assigns) do
-      assign(
-        assigns,
-        call_name: call_name(data(assigns.event, :call)),
-        output: format_text(data(assigns.event, :output))
-      )
+      assigns =
+        assign(
+          assigns,
+          call_name: call_name(data(assigns.event, :call)),
+          output: format_text(data(assigns.event, :output))
+        )
 
       ~H"""
       <li class="k-event is-tool">
@@ -1110,7 +1146,7 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
       <header class="k-event-head">
         <span class="k-seq">{@event.sequence}</span>
         <strong>{@label}</strong>
-        <span class="k-muted">{@event.elapsed_ms} ms</span>
+        <span class="k-muted">at {@event.elapsed_ms} ms</span>
       </header>
       """
     end
