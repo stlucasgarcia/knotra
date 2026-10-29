@@ -30,6 +30,16 @@ defmodule KnotraBots do
   @doc "Host authorization scope handed to Knotra's public API."
   def scope, do: %{tenant: @tenant, permissions: @permissions}
 
+  @doc """
+  Scope for the demo's non-human host policy.
+
+  The chat relay answers read-only tool approvals with this scope, so an
+  auto-approved operation is recorded against `"policy:read-only"` instead of a
+  workstation user. It grants no action except `:answer`.
+  """
+  def policy_scope,
+    do: %{tenant: @tenant, permissions: [:answer], responder: "policy:read-only"}
+
   @doc "Selectable model strings: the online catalog plus the offline fake."
   def catalog, do: @catalog ++ [@offline]
 

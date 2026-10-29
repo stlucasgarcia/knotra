@@ -2,7 +2,7 @@
 
 A minimal **agentic chat** POC built on [Knotra](../../README.md): humans and
 host-defined agents share channels, work in the open, and ask for approval before
-a tool runs.
+a write tool runs.
 
 - **Channels** hold one shared timeline for people and agents.
 - **`@handle` routing** sends a message to the agents you mention; without a
@@ -10,11 +10,11 @@ a tool runs.
 - **Handoffs** let one agent mention a teammate, which starts that teammate's
   durable execution. One hop only, so a handoff cannot loop.
 - **Every agent reply is one durable execution** with a status, counters, event
-  trace, and an inline clarification or approval gate.
+  trace, and an inline clarification or write-approval gate.
 - **Restart-safe** approvals and messages: pending work is still there after the
   server or the Knotra runtime restarts.
-- **Read-only and write tools are both approval-gated** on the durable path, so
-  the demo shows the real decision point before any effect.
+- **Only write tools wait for a person.** Read-only `lookup` approvals are
+  answered by the demo's host policy, while `notify` waits for Approve/Reject.
 - The only effect is a fake append-only notice file. Nothing is sent anywhere.
 
 The [library documentation](../../README.md) stays authoritative for the full
@@ -55,8 +55,9 @@ With `KNOTRA_BOTS_MODEL=fake`:
    `@concierge` answers “Handing this to @researcher.” A new `@researcher`
    message appears, because the mention became a second durable execution.
 
-2. `@researcher` proposes `lookup` with `%{"query" => "ord-1"}`. Approve it in the
-   message. The tool runs and the same message completes with
+2. `@researcher` proposes `lookup` with `%{"query" => "ord-1"}`. The read-only
+   request is answered by the chat relay's host policy, so there is nothing to
+   click: the same message completes with
    “Done. The result was: Order ord-1 shipped and arrives Tuesday.”
 
 3. Send:
@@ -142,6 +143,10 @@ goes to it. Mention one or more handles to address specific agents:
 @researcher @concierge can you check ord-2 and notify ops?
 ```
 
+Typing `@` in the composer lists the channel's agents, filtered as you type.
+Use ↑/↓ to move the highlight; Tab, Enter, or a click picks it. Escape dismisses
+the list.
+
 Two starter channels are seeded when the table is empty:
 
 - **#Ops** — Concierge (default) and Researcher.
@@ -164,10 +169,11 @@ misconfigured prompt from creating an unbounded agent-to-agent loop.
 Each agent message shows its live state:
 
 - **Queued / working** — the execution is submitted or running.
-- **Needs you** — a pending clarification or approval is rendered in the message.
+- **Needs you** — a pending clarification, or a write approval, is rendered in the
+  message.
   - A clarification is an `input_request`; the answer form calls
     `Knotra.answer/5`, and the same execution continues.
-  - An approval shows the operation name and validated arguments; Approve/Reject
+  - A write approval shows the operation name and validated arguments; Approve/Reject
     answer the bound request.
 - **Done** — the durable output.
 - **Failed / blocked / rejected / cancelled / expired** — the terminal status and
@@ -175,10 +181,23 @@ Each agent message shows its live state:
 - The **trace** disclosure shows turn/tool/retry counts, the event sequence and
   elapsed milliseconds, and the pinned definition version.
 
-Every durable tool call requires a human approval in this path, including the
-read-only `lookup`. That is deliberate: the demo is about the gate, not about
-implicit host authority. `notify` is a fake effect that appends one line to
+## Tool approval policy
+
+Knotra's durable path records a bound approval before every tool call; that is the
+runtime contract, not a demo setting. On top of it, `KnotraBots.Chat` applies a host
+policy: when a pending approval names a tool the agent offers with
+`read_only: true`, the relay answers it immediately with the `policy:read-only`
+responder. The gate and its `approval_answered` event remain in the execution trace,
+but a human is never asked.
+
+Write tools are not auto-answered. `notify` is `read_only: false`, so its message
+shows the operation name and validated arguments and waits for Approve/Reject.
+Rejecting records `rejected` and performs no effect. `notify` appends one line to
 `_build/notices.log`; it performs no network or real messaging operation.
+
+Read-onlyness is a trusted tool declaration, not a sandbox. A production host should
+derive the responder from its authenticated approver and keep consequential
+operations human-gated.
 
 ## Models
 
@@ -214,6 +233,8 @@ Knotra runtime with a pending approval, start it again, and reload the channel:
 - The human and agent messages are still listed.
 - The pending approval or clarification is rebuilt from the durable snapshot.
 - Answering it resumes the same execution with preserved counters and budgets.
+- A pending read-only approval is answered by the relay's host policy on its next
+  tick; a pending write approval still waits for you.
 - A queued agent message without an execution is submitted again with its
   deterministic key; the durable store deduplicates it.
 
@@ -274,7 +295,9 @@ mix test
 No API key and no network are used: tests force the fake model and cover:
 
 - default routing, explicit mentions, and one-hop handoffs;
-- the concierge → researcher lookup approval and its output;
+- the @ mention picker listing channel agents and inserting the chosen handle;
+- the concierge → researcher lookup completing without a human gate;
+- read-only auto-approval recorded against the `policy:read-only` responder;
 - approve and reject for `notify`, including exactly one notice line;
 - inline clarification answer and completion;
 - a pending approval surviving a Knotra runtime restart;
@@ -290,16 +313,19 @@ No API key and no network are used: tests force the fake model and cover:
   not a distributed takeover protocol.
 - **One handoff hop.** More hops need an explicit budget/routing policy; the
   current bound keeps a prompt loop from spawning executions forever.
-- **Every durable tool call needs approval**, including read-only ones. Read-only
-  auto-approval is a deliberate follow-up, not an implicit permission.
+- **Approvals are host policy for reads.** The durable runtime still publishes a
+  bound approval for every tool call; the chat relay auto-answers read-only ones.
+  Read-onlyness is a trusted declaration, not enforcement, so a tool that lies
+  about being read-only would be auto-approved.
 - **No threads, reactions, files, images, voice, or streaming tokens.** An agent
   message appears with a working state and updates when the execution reaches a
   gate or terminal status.
 - **Transcript replay, no compaction.** Each execution receives the channel
   history; long channels grow the prompt.
 - **Demo access policy.** `KnotraBots.Access` allows only the `demo` tenant and
-  derives the responder reference from `USER`. A real host derives tenant and
-  responder from authenticated request data.
+  uses a host-supplied responder or `USER`. The read-only policy scope supplies
+  `policy:read-only`. A real host derives tenant and responder from authenticated
+  request data.
 - **Host-owned identities.** Channels and messages are host tables; each agent
   message references a Knotra execution id. A real host keeps such tables instead
   of reaching into Knotra's persistence schema.

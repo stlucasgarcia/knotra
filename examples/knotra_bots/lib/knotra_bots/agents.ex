@@ -46,6 +46,16 @@ defmodule KnotraBots.Agents do
   @doc "The tool modules an agent offers."
   def tool_modules(%Agent{tools: tools}), do: Enum.map(split(tools), &Map.fetch!(@tools, &1))
 
+  @doc "True when the agent offers the named tool and that tool is declared read-only."
+  def read_only_tool?(%Agent{} = agent, name) when is_binary(name) do
+    Enum.any?(tool_modules(agent), fn module ->
+      definition = module.definition()
+      definition.name == name and definition.read_only == true
+    end)
+  end
+
+  def read_only_tool?(_agent, _name), do: false
+
   def create(attrs) do
     %Agent{id: new_id()}
     |> Agent.changeset(attrs)

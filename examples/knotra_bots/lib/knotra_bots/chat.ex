@@ -10,6 +10,11 @@ defmodule KnotraBots.Chat do
 
   The tick is restart-safe: a queued message without an execution is submitted
   with the same key again, and the durable store deduplicates it.
+
+  Knotra's durable path records a bound approval before every tool call. This
+  demo's host policy answers read-only approvals itself as soon as it observes
+  them, so only write proposals wait for a human. The gate stays in the durable
+  trace; the UI never asks a person for a read-only one.
   """
 
   use GenServer
@@ -92,8 +97,14 @@ defmodule KnotraBots.Chat do
   end
 
   @doc "Answers a pending clarification or approval for an agent message."
-  def answer(%Message{author_type: "agent", execution_id: execution_id} = message, answer)
-      when is_binary(execution_id) do
+  def answer(%Message{} = message, answer), do: answer(message, KnotraBots.scope(), answer)
+
+  defp answer(
+         %Message{author_type: "agent", execution_id: execution_id} = message,
+         scope,
+         answer
+       )
+       when is_binary(execution_id) do
     case Agents.get(message.agent_id) do
       nil ->
         {:error, :agent_missing}
@@ -103,7 +114,7 @@ defmodule KnotraBots.Chat do
                KnotraBots.Instance,
                execution_id,
                Agents.definition(agent),
-               KnotraBots.scope(),
+               scope,
                answer
              ) do
           {:ok, snapshot} ->
@@ -119,7 +130,7 @@ defmodule KnotraBots.Chat do
     :exit, _ -> {:error, :unavailable}
   end
 
-  def answer(_message, _answer), do: {:error, :not_pending}
+  defp answer(_message, _scope, _answer), do: {:error, :not_pending}
 
   def snapshot(%Message{author_type: "agent", execution_id: execution_id})
       when is_binary(execution_id) do
@@ -138,13 +149,23 @@ defmodule KnotraBots.Chat do
   @impl true
   def init(:ok) do
     schedule()
-    {:ok, %{}}
+
+    {:ok,
+     %{
+       auto_approval_logged: MapSet.new(),
+       auto_approval_retry: %{}
+     }}
   end
 
   @impl true
   def handle_info(:tick, state) do
     schedule()
-    Enum.each(pending_messages(), &sync/1)
+
+    state =
+      Enum.reduce(pending_messages(), state, fn message, state ->
+        sync(message, state)
+      end)
+
     {:noreply, state}
   end
 
@@ -165,8 +186,12 @@ defmodule KnotraBots.Chat do
     _ -> []
   end
 
-  defp sync(%Message{execution_id: nil} = message), do: submit(message)
-  defp sync(%Message{} = message), do: poll(message)
+  defp sync(%Message{execution_id: nil} = message, state) do
+    submit(message)
+    state
+  end
+
+  defp sync(%Message{} = message, state), do: poll(message, state)
 
   defp submit(message) do
     case Agents.get(message.agent_id) do
@@ -211,25 +236,109 @@ defmodule KnotraBots.Chat do
     :exit, _ -> :ok
   end
 
-  defp poll(message) do
+  defp poll(message, state) do
     case snapshot(message) do
       nil ->
-        :ok
+        state
 
-      %{status: :waiting} ->
-        put_message(message, %{status: "waiting"})
+      %{status: :waiting} = snapshot ->
+        case approve_read_only(message, snapshot, state) do
+          {:ok, state} ->
+            put_message(message, %{status: "running"})
+            state
+
+          {:hold, state} ->
+            put_message(message, %{status: "waiting"})
+            state
+        end
 
       %{status: status} when status in [:accepted, :running, :decided, :ready] ->
         put_message(message, %{status: "running"})
+        state
 
       %{status: :completed} = snapshot ->
         updated = put_message(message, %{status: "completed", body: snapshot.output || ""})
         maybe_chain(updated)
+        state
 
       %{status: status} = snapshot ->
         put_message(message, %{status: to_string(status), body: terminal_body(status, snapshot)})
+        state
     end
   end
+
+  # The durable runtime always publishes a bound approval before a tool call. This
+  # demo's host policy approves read-only tools immediately; a write proposal keeps
+  # waiting for a human. The execution and its trace stay durable either way.
+  defp approve_read_only(
+         %Message{} = message,
+         %{approval: %{disposition: :pending} = approval},
+         state
+       ) do
+    key = {message.id, approval.id, approval.version}
+
+    with true <- auto_approval_due?(state, key),
+         %Agent{} = agent <- Agents.get(message.agent_id),
+         true <- Agents.read_only_tool?(agent, approval.name) do
+      case answer(
+             message,
+             KnotraBots.policy_scope(),
+             %{
+               request_id: approval.id,
+               version: approval.version,
+               name: approval.name,
+               arguments: approval.arguments,
+               decision: :approve
+             }
+           ) do
+        {:ok, _snapshot} ->
+          {:ok, clear_auto_approval_failure(state, key)}
+
+        {:error, reason} ->
+          {:hold, log_auto_approval_failure(state, key, message, reason)}
+      end
+    else
+      _ -> {:hold, state}
+    end
+  end
+
+  defp approve_read_only(_message, _snapshot, state), do: {:hold, state}
+
+  @auto_approval_retry_ms 5_000
+
+  defp auto_approval_due?(state, key) do
+    case state.auto_approval_retry do
+      %{^key => retry_at} -> now_ms() >= retry_at
+      _ -> true
+    end
+  end
+
+  # A persistent failure would otherwise retry and warn on every tick. Retry on a
+  # cooldown so transient errors recover, and log once per approval attempt version.
+  defp log_auto_approval_failure(state, key, message, reason) do
+    unless MapSet.member?(state.auto_approval_logged, key) do
+      Logger.warning("read-only auto-approval failed for #{message.id}: #{inspect(reason)}")
+    end
+
+    logged = MapSet.put(state.auto_approval_logged, key)
+    retry = Map.put(state.auto_approval_retry, key, now_ms() + @auto_approval_retry_ms)
+
+    # Bound the bookkeeping over a long-lived demo; rebuilding is cheap.
+    logged = if MapSet.size(logged) > 200, do: MapSet.new(), else: logged
+    retry = if map_size(retry) > 200, do: %{}, else: retry
+
+    %{state | auto_approval_logged: logged, auto_approval_retry: retry}
+  end
+
+  defp clear_auto_approval_failure(state, key) do
+    %{
+      state
+      | auto_approval_logged: MapSet.delete(state.auto_approval_logged, key),
+        auto_approval_retry: Map.delete(state.auto_approval_retry, key)
+    }
+  end
+
+  defp now_ms, do: System.monotonic_time(:millisecond)
 
   defp terminal_body(:rejected, _snapshot), do: "Approval rejected."
   defp terminal_body(:expired, _snapshot), do: "The interaction expired."

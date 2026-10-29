@@ -36,14 +36,36 @@ defmodule KnotraBotsWeb.ChatLive do
      |> assign(:channel, channel)
      |> assign(:agents, [])
      |> assign(:messages, [])
+     |> assign(:suggestions, [])
+     |> assign(:suggestions_dismissed, false)
      |> assign(:draft, "")
+     |> assign(:mention_revision, 0)
      |> assign(:error, nil)
      |> load_messages()}
   end
 
   @impl true
   def handle_event("draft", %{"message" => text}, socket) do
-    {:noreply, assign(socket, :draft, text)}
+    {:noreply,
+     socket
+     |> assign(:draft, text)
+     |> assign(:suggestions_dismissed, false)
+     |> assign_suggestions()}
+  end
+
+  def handle_event("pick_agent", %{"handle" => handle}, socket) do
+    draft = insert_mention(socket.assigns.draft, handle)
+
+    {:noreply,
+     socket
+     |> assign(:draft, draft)
+     |> assign(:suggestions_dismissed, false)
+     |> assign(:mention_revision, socket.assigns.mention_revision + 1)
+     |> assign_suggestions()}
+  end
+
+  def handle_event("dismiss_mentions", _params, socket) do
+    {:noreply, socket |> assign(:suggestions_dismissed, true) |> assign(:suggestions, [])}
   end
 
   def handle_event("send", _params, %{assigns: %{channel: nil}} = socket) do
@@ -140,9 +162,58 @@ defmodule KnotraBotsWeb.ChatLive do
     socket
     |> assign(:agents, Channels.agents(channel.id))
     |> assign(:messages, Chat.with_snapshots(channel.id))
+    |> assign_suggestions()
   end
 
   defp find(socket, id), do: Enum.find(socket.assigns.messages, &(&1.message.id == id))
+
+  # The composer sends text, not a caret offset, so suggestions follow a mention
+  # token at the end of the draft: "@" or "@pre". Picking replaces that token.
+  @mention_tail ~r/(^|[\s(])@([a-zA-Z0-9_-]*)\z/
+
+  defp assign_suggestions(socket) do
+    suggestions =
+      if socket.assigns.suggestions_dismissed do
+        []
+      else
+        suggestions(socket.assigns.draft, socket.assigns.agents)
+      end
+
+    assign(socket, :suggestions, suggestions)
+  end
+
+  defp active_descendant([]), do: nil
+  defp active_descendant([agent | _]), do: "mention-option-" <> agent.handle
+
+  defp suggestions(draft, agents) do
+    case Regex.run(@mention_tail, draft) do
+      [_, _delimiter, prefix] ->
+        prefix = String.downcase(prefix)
+
+        Enum.filter(agents, fn agent ->
+          String.starts_with?(agent.handle, prefix) or
+            String.starts_with?(String.downcase(agent.name), prefix)
+        end)
+
+      nil ->
+        []
+    end
+  end
+
+  defp insert_mention(draft, handle) do
+    mention = "@" <> handle <> " "
+
+    cond do
+      String.ends_with?(draft, mention) ->
+        draft
+
+      Regex.match?(@mention_tail, draft) ->
+        Regex.replace(@mention_tail, draft, fn _, delimiter -> delimiter <> mention end)
+
+      true ->
+        draft
+    end
+  end
 
   defp decision("approve"), do: :approve
   defp decision(_reject_or_other), do: :reject
@@ -196,17 +267,59 @@ defmodule KnotraBotsWeb.ChatLive do
 
       <p :if={@error} class="error chat-error" data-testid="chat-error">{@error}</p>
 
-      <form id="composer" class="composer" phx-submit="send" phx-change="draft">
-        <textarea
-          id="composer-input"
-          name="message"
-          rows="2"
-          placeholder={placeholder(@channel)}
-          required
-          phx-hook="Composer"
-        >{@draft}</textarea>
-        <button type="submit">Send</button>
-      </form>
+      <div class="composer-wrap">
+        <div :if={@suggestions != []} class="mention-menu" data-testid="mention-menu">
+          <div class="mention-menu-header">
+            <span>Mention an agent</span>
+            <span class="mention-menu-hint">
+              <kbd>↑</kbd><kbd>↓</kbd> move <kbd>Tab</kbd>/<kbd>Enter</kbd> pick
+            </span>
+          </div>
+
+          <div
+            id="mention-list"
+            class="mention-options"
+            role="listbox"
+            aria-label="Mention an agent"
+          >
+            <button
+              :for={{agent, index} <- Enum.with_index(@suggestions)}
+              id={"mention-option-" <> agent.handle}
+              type="button"
+              role="option"
+              class={["mention-option", index == 0 && "is-active"]}
+              aria-selected={to_string(index == 0)}
+              data-testid={"mention-option-" <> agent.handle}
+              phx-click="pick_agent"
+              phx-value-handle={agent.handle}
+            >
+              <.avatar agent={agent} size="sm" />
+              <span class="mention-name">{agent.name}</span>
+              <span class="mention-handle">@{agent.handle}</span>
+            </button>
+          </div>
+        </div>
+
+        <form id="composer" class="composer" phx-submit="send" phx-change="draft">
+          <textarea
+            id="composer-input"
+            name="message"
+            rows="2"
+            role="combobox"
+            aria-label="Message"
+            aria-autocomplete="list"
+            aria-controls="mention-list"
+            aria-expanded={to_string(@suggestions != [])}
+            aria-activedescendant={active_descendant(@suggestions)}
+            placeholder={placeholder(@channel)}
+            data-draft={@draft}
+            data-mention-revision={@mention_revision}
+            required
+            phx-hook="Composer"
+          >{@draft}</textarea>
+          <button type="submit">Send</button>
+        </form>
+      </div>
 
       <p class="hint">
         Mention an agent with <code>@handle</code>. Without a mention,

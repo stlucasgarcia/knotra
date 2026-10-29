@@ -80,7 +80,74 @@ defmodule KnotraBotsTest do
     assert alpha_reply.body =~ "Alpha received: hello default"
   end
 
-  test "a concierge handoff becomes a researcher approval and completes inline",
+  test "typing @ lists channel agents and picking one inserts the handle",
+       %{notices: _notices} do
+    alpha = agent_fixture(%{"name" => "Picker Alpha", "handle" => unique_handle("picker-alpha")})
+    beta = agent_fixture(%{"name" => "Picker Beta", "handle" => unique_handle("picker-beta")})
+
+    outsider =
+      agent_fixture(%{"name" => "Picker Outsider", "handle" => unique_handle("picker-outsider")})
+
+    channel = channel_fixture([alpha, beta], default: alpha.id)
+
+    {:ok, view, _html} = live(build_conn(), "/channels/#{channel.id}")
+
+    view |> form("#composer", %{"message" => "@"}) |> render_change()
+
+    html = render(view)
+    assert html =~ ~s(data-testid="mention-menu")
+    assert html =~ ~s(aria-controls="mention-list")
+    assert html =~ ~s(aria-expanded="true")
+    assert html =~ ~s(aria-activedescendant="mention-option-#{alpha.handle}")
+
+    menu = view |> element(~s([data-testid="mention-menu"])) |> render()
+    assert menu =~ "@#{alpha.handle}"
+    assert menu =~ "@#{beta.handle}"
+    assert menu =~ ~s(class="mention-option is-active")
+    assert menu =~ ~s(aria-selected="true")
+    refute menu =~ "@#{outsider.handle}"
+
+    view
+    |> element("#composer-input")
+    |> render_hook("dismiss_mentions", %{})
+
+    html = render(view)
+    refute html =~ ~s(data-testid="mention-menu")
+    assert html =~ ~s(aria-expanded="false")
+    refute html =~ "aria-activedescendant"
+
+    send(view.pid, :refresh)
+    refute render(view) =~ ~s(data-testid="mention-menu")
+
+    prefix = String.slice(beta.handle, 0, String.length("picker-beta-"))
+
+    view |> form("#composer", %{"message" => "@" <> prefix}) |> render_change()
+
+    menu = view |> element(~s([data-testid="mention-menu"])) |> render()
+    assert menu =~ "@#{beta.handle}"
+    refute menu =~ "@#{alpha.handle}"
+
+    view
+    |> element(~s([data-testid="mention-option-#{beta.handle}"]))
+    |> render_click()
+
+    html = render(view)
+    refute html =~ ~s(data-testid="mention-menu")
+    assert html =~ ~s(data-draft="@#{beta.handle} ")
+
+    view |> form("#composer") |> render_submit()
+
+    reply =
+      await_agent_message(
+        channel.id,
+        &(&1.agent_id == beta.id and &1.status == "completed")
+      )
+
+    assert reply.body =~ "Picker Beta received:"
+    refute Enum.any?(agent_messages(channel.id), &(&1.agent_id == alpha.id))
+  end
+
+  test "a concierge handoff becomes a researcher lookup that runs without a human gate",
        %{notices: _notices} do
     concierge = Agents.get!("concierge")
     researcher = Agents.get!("researcher")
@@ -101,12 +168,6 @@ defmodule KnotraBotsTest do
     research = await_agent_message(channel.id, &(&1.agent_id == researcher.id))
     assert research.hop == 1
 
-    await_html(view, &String.contains?(&1, ~s(data-testid="approval")))
-
-    view
-    |> element(~s(button[phx-value-id="#{research.id}"][phx-value-decision="approve"]))
-    |> render_click()
-
     done =
       await_agent_message(
         channel.id,
@@ -114,6 +175,14 @@ defmodule KnotraBotsTest do
       )
 
     assert done.body =~ "Order ord-1 shipped"
+
+    assert Enum.any?(
+             Chat.snapshot(done).events,
+             &(&1.type == :approval_answered and &1.responder_id == "policy:read-only")
+           )
+
+    html = await_html(view, &String.contains?(&1, "Order ord-1 shipped"))
+    refute html =~ ~s(data-testid="approval")
   end
 
   test "approving notify writes exactly one fake notice", %{notices: notices} do
