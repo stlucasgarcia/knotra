@@ -13,7 +13,7 @@ defmodule Knotra.Models.ReqLLM do
 
     try do
       with {:ok, context} <- context(request),
-           {:ok, tools} <- tools(request.tools),
+           {:ok, tools} <- request_tools(request),
            {:ok, response} <-
              ReqLLM.generate_text(
                Keyword.fetch!(opts, :model),
@@ -30,6 +30,17 @@ defmodule Knotra.Models.ReqLLM do
       usage_reported?(usage_key)
     end
   end
+
+  @doc """
+  Builds the provider tool schemas once per execution. Executions cache the result
+  and pass it back as `:prepared_tools`, so schema compilation does not repeat on
+  every model turn.
+  """
+  @impl true
+  def prepare_tools(definitions), do: tools(definitions)
+
+  defp request_tools(%{prepared_tools: tools}) when is_list(tools), do: {:ok, tools}
+  defp request_tools(request), do: tools(request.tools)
 
   @doc "Version of this adapter's inert continuation representation for opt-in checkpoints."
   @impl true
@@ -104,11 +115,14 @@ defmodule Knotra.Models.ReqLLM do
          %Knotra.Reply{
            text: outcome.text,
            calls: calls,
-           usage: ReqLLM.Response.usage(response),
+           usage: portable_usage(ReqLLM.Response.usage(response)),
            continuation: response.message
          }}
     end
   end
+
+  defp portable_usage(nil), do: nil
+  defp portable_usage(usage), do: Knotra.Checkpoint.portable(usage)
 
   defp usage_reported?(ref, reported \\ false) do
     receive do

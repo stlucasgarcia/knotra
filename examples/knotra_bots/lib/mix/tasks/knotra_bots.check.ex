@@ -5,8 +5,8 @@ defmodule Mix.Tasks.KnotraBots.Check do
   result through the Knotra adapter.
 
   Knotra redacts raw exception text from public records and collapses provider
-  errors to `:model_error`, so a dashboard run that fails at `model_started` shows
-  no cause. This task calls ReqLLM directly and prints the provider's reason (for
+  errors to `:model_error`, so a chat reply that fails at `model_started` shows no
+  cause. This task calls ReqLLM directly and prints the provider's reason (for
   example `API key not valid`, quota or an unavailable model):
 
       mix knotra_bots.check

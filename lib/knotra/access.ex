@@ -9,11 +9,20 @@ defmodule Knotra.Access do
   of 1–256 bytes, never credentials or a channel/model-supplied actor. It is recorded
   atomically with the decision or answer.
   Other actions may still return `{:ok, tenant_id}`. `:cancel` permits pre-admission
-  durable cancellation; inspection/recovery/answering also materialize an
-  already-due response expiry.
+  durable cancellation; `:close` deletes one terminal or blocked record and releases
+  its capacity; `:list` is tenant-scoped inspection of public records.
+  Inspection/recovery/answering/listing also materialize an already-due response
+  expiry.
   """
   @callback authorize(
-              :submit | :inspect | :checkpoint | :recover | :answer | :cancel,
+              :submit
+              | :inspect
+              | :list
+              | :checkpoint
+              | :recover
+              | :answer
+              | :cancel
+              | :close,
               String.t() | nil,
               term()
             ) ::

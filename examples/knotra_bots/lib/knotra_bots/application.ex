@@ -10,6 +10,7 @@ defmodule KnotraBots.Application do
       {Phoenix.PubSub, name: KnotraBots.PubSub},
       KnotraBots.Repo,
       instance_spec(),
+      KnotraBots.Chat,
       KnotraBotsWeb.Endpoint
     ]
 
@@ -32,7 +33,7 @@ defmodule KnotraBots.Application do
   defp instance_spec do
     {Knotra,
      name: @instance,
-     max_executions: 4,
+     max_executions: 8,
      durable: [
        repo: KnotraBots.Repo,
        access: KnotraBots.Access,

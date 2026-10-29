@@ -333,6 +333,32 @@ defmodule Knotra.Models.ReqLLMTest do
     assert {:ok, _} = Knotra.Checkpoint.encode(Map.take(reply, [:text, :calls, :usage]))
   end
 
+  test "normalized provider usage stays checkpoint-portable" do
+    usage = ReqLLM.Usage.normalize(%{"prompt_tokens" => 10, "completion_tokens" => 3})
+    assert Map.has_key?(usage, :input_includes_cached)
+
+    assert {:error, :unsupported_checkpoint} = Knotra.Checkpoint.encode(usage)
+
+    portable = Knotra.Checkpoint.portable(usage)
+    assert portable[:input_tokens] == 10
+    assert is_boolean(portable["input_includes_cached"])
+    assert {:ok, _bytes} = Knotra.Checkpoint.encode(%{text: "", calls: [], usage: portable})
+  end
+
+  test "prepared provider tools are built once per execution" do
+    definition = %{
+      name: "receipt",
+      description: "Read a receipt",
+      read_only: true,
+      parameters: %{
+        "type" => "object",
+        "properties" => %{"id" => %{"type" => "string"}}
+      }
+    }
+
+    assert {:ok, [%ReqLLM.Tool{name: "receipt"}]} = Adapter.prepare_tools([definition])
+  end
+
   test "replacement loop can make a second model turn after a text-only response" do
     start_supervised!({Knotra, name: __MODULE__})
 

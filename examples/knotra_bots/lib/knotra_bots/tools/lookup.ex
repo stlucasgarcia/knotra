@@ -3,7 +3,9 @@ defmodule KnotraBots.Tools.Lookup do
   Read-only order lookup over a tiny hardcoded map.
 
   The host owns the scope; tenant identity comes from `authorize/2`, never from
-  model-supplied arguments.
+  model-supplied arguments. The durable runtime still records a bound approval
+  before this call; because the definition is `read_only: true`, the demo's chat
+  relay answers it immediately and a human is never asked.
   """
 
   @behaviour Knotra.Tool

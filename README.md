@@ -5,7 +5,9 @@ An embedded, plugin-driven Elixir agent harness for background work and an opt-i
 **Neither path is production-ready.** `start/5` is the milestone-1 in-memory,
 read-only path. [Durable approvals](docs/durable-approvals.md) adds a bounded
 SQLite/fake-operation slice with pending approvals and input requests through
-optional Ecto/Ecto SQL and a host-owned Repo.
+optional Ecto/Ecto SQL and a host-owned Repo. Durable records can be listed and
+deleted through `Knotra.list/3` and `Knotra.close/3`, authorized by the host's
+`:inspect` and `:close` actions.
 See [ADR 0001](docs/adr/0001-ecto-sqlite-persistence.md) for the approved persistence
 dependency exception; other dependencies still require authorization.
 
@@ -50,10 +52,18 @@ in prompts. `start/5` returns a local process handle, **not durable acceptance**
 The observer optionally sends `{:knotra, snapshot}` messages to the supplied PID.
 A terminal snapshot has status `:completed`, `:failed`, or `:cancelled`.
 
+Composition and tool definitions are validated before the process starts:
+duplicate tool names, malformed definitions and write-only tools on the ordinary
+path return `{:error, :invalid_tool_definitions}`, and invalid model/loop/observer
+plugins return `{:error, :invalid_configuration}`. A completed model reply must
+contain non-empty text; otherwise the execution fails with `:empty_response`.
+
 Capacity includes retained terminal handles: explicitly release them to free a
 slot. Over-capacity requests return `{:error, :max_children}`; there is no queue.
-Snapshots disappear when their execution process or host stops. IDs are unique
-only within the current BEAM instance, not durable global identifiers.
+`snapshot/1`, `cancel/1` and `release/1` return `{:error, :not_found}` for a handle
+that was already released or terminated. Snapshots disappear when their execution
+process or host stops. IDs are unique only within the current BEAM instance, not
+durable global identifiers.
 
 ## Host tools: validation before authorization before execution
 
@@ -191,7 +201,9 @@ See [the architecture and future workflow scenarios](ARCHITECTURE.md),
 [the milestone-1 design](docs/design.md), and
 [the historical alternatives research](docs/research/elixir-agent-alternatives.md).
 The runnable Phoenix LiveView example host lives in
-[`examples/knotra_bots`](examples/knotra_bots).
+[`examples/knotra_bots`](examples/knotra_bots): a minimal agentic chat POC where
+humans and agents share channels, mention each other, and answer inline approval
+or clarification gates.
 The opt-in approval subset, the restart-safe clarification (input request)
 slice, and the narrow idempotent fake-recovery contract are implemented as
 documented above. Takeover, structured UI, voice, delegation and generated-code

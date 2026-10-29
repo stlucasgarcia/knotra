@@ -23,6 +23,7 @@ defmodule Knotra.Execution do
 
       state = %{
         tasks: tasks,
+        instance: instance_name(tasks),
         definition: definition,
         input: input,
         auth: auth,
@@ -32,12 +33,14 @@ defmodule Knotra.Execution do
         deadline_at: started_at + limits.timeout,
         status: :running,
         events: [],
+        next_sequence: 0,
         output: nil,
         error: nil,
         last: nil,
         loop_state: nil,
         exchanges: [],
         tool_definitions: [],
+        prepared_tools: nil,
         counts: %{turns: 0, tools: 0, retries: 0, steps: 0},
         task: nil,
         stage: nil,
@@ -66,9 +69,14 @@ defmodule Knotra.Execution do
   end
 
   def handle_call(:release, _from, state) do
-    {:via, Registry, {instance, :tasks}} = state.tasks
-    {:reply, {:ok, {:via, Registry, {instance, :executions}}}, state}
+    case state.instance do
+      nil -> {:reply, {:error, :not_found}, state}
+      instance -> {:reply, {:ok, {:via, Registry, {instance, :executions}}}, state}
+    end
   end
+
+  @impl true
+  def handle_info({:EXIT, _pid, _reason}, state), do: {:noreply, state}
 
   @impl true
   def handle_info({ref, result}, %{task: %Task{ref: ref}} = state) do
@@ -141,9 +149,13 @@ defmodule Knotra.Execution do
 
   defp consume({:plugin_error, reason}, state), do: finish(state, :failed, reason)
 
-  defp consume({:ok, {:ok, tools, loop_state}}, %{stage: :setup} = state) do
+  defp consume({:ok, {:ok, tools, prepared, loop_state}}, %{stage: :setup} = state) do
     state
-    |> Map.merge(%{tool_definitions: tools, loop_state: loop_state})
+    |> Map.merge(%{
+      tool_definitions: tools,
+      prepared_tools: prepared,
+      loop_state: loop_state
+    })
     |> event(:started, %{input: state.input})
     |> observe()
   end
@@ -154,9 +166,11 @@ defmodule Knotra.Execution do
     do: finish(state, :failed, :observer_failed)
 
   defp consume({:ok, {:done, text}}, %{stage: :loop} = state) when is_binary(text) do
-    if pending(state) == [],
-      do: finish(state, :completed, text),
-      else: finish(state, :failed, :pending_tools)
+    cond do
+      pending(state) != [] -> finish(state, :failed, :pending_tools)
+      String.trim(text) == "" -> finish(state, :failed, :empty_response)
+      true -> finish(state, :completed, text)
+    end
   end
 
   defp consume({:ok, {:model, next}}, %{stage: :loop} = state) do
@@ -172,9 +186,10 @@ defmodule Knotra.Execution do
   end
 
   defp consume({:ok, {:ok, %Knotra.Reply{} = reply}}, %{stage: :model} = state) do
+    # Durable runs resolve one pending call per reply, or finish as text-only work
+    # with a zero-call reply.
     if valid_reply?(reply, state) and
-         (is_nil(state.durable) or length(reply.calls) == 1 or
-            (reply.calls == [] and zero_call_allowed?(reply, state))) do
+         (is_nil(state.durable) or length(reply.calls) <= 1) do
       visible = Map.take(reply, [:text, :calls, :usage, :input_request])
 
       state
@@ -189,34 +204,12 @@ defmodule Knotra.Execution do
     end
   end
 
-  defp consume({:ok, {:ok, output}}, %{stage: {:tool, call}} = state) when is_binary(output) do
-    exchanges =
-      List.update_at(state.exchanges, -1, fn exchange ->
-        %{exchange | results: exchange.results ++ [%{call: call, output: output}]}
-      end)
+  defp consume({:ok, {:ok, output}}, %{stage: {:tool, call}} = state) when is_binary(output),
+    do: record_tool_result(state, call, output)
 
-    state =
-      if state.durable,
-        do:
-          put_in(state.approval.operation, %{
-            state.approval.operation
-            | status: :succeeded,
-              result: output
-          }),
-        else: state
-
-    result = %{call: call, output: output}
-
-    result =
-      if state.durable,
-        do: Map.put(result, :operation_id, state.approval.operation.id),
-        else: result
-
-    state
-    |> Map.merge(%{exchanges: exchanges, last: {:tool, %{call: call, output: output}}})
-    |> event(:tool_result, result)
-    |> observe()
-  end
+  defp consume({:ok, {:ok, validated, output}}, %{stage: {:tool, call}} = state)
+       when is_map(validated) and is_binary(output),
+       do: record_tool_result(state, %{call | arguments: validated}, output)
 
   defp consume(
          {:ok, {:not_dispatched, reason}},
@@ -277,6 +270,35 @@ defmodule Knotra.Execution do
     finish(state, :failed, :invalid_plugin_result)
   end
 
+  defp record_tool_result(state, call, output) do
+    exchanges =
+      List.update_at(state.exchanges, -1, fn exchange ->
+        %{exchange | results: exchange.results ++ [%{call: call, output: output}]}
+      end)
+
+    state =
+      if state.durable,
+        do:
+          put_in(state.approval.operation, %{
+            state.approval.operation
+            | status: :succeeded,
+              result: output
+          }),
+        else: state
+
+    result = %{call: call, output: output}
+
+    result =
+      if state.durable,
+        do: Map.put(result, :operation_id, state.approval.operation.id),
+        else: result
+
+    state
+    |> Map.merge(%{exchanges: exchanges, last: {:tool, %{call: call, output: output}}})
+    |> event(:tool_result, result)
+    |> observe()
+  end
+
   defp advance(state) do
     cond do
       expired?(state) ->
@@ -302,7 +324,14 @@ defmodule Knotra.Execution do
 
       true ->
         {module, opts} = state.definition.model
-        request = %{input: state.input, exchanges: state.exchanges, tools: state.tool_definitions}
+
+        request = %{
+          input: state.input,
+          exchanges: state.exchanges,
+          tools: state.tool_definitions,
+          prepared_tools: state.prepared_tools
+        }
+
         state = state |> count(:turns) |> event(:model_started, %{})
         launch(state, :model, fn -> module.call(request, opts) end)
     end
@@ -343,9 +372,23 @@ defmodule Knotra.Execution do
 
   defp observe(state) do
     {module, opts} = state.definition.observer
-    snapshot = public(state)
-    launch(state, :observation, fn -> module.record(snapshot, opts) end)
+
+    if noop_observer?(module, opts) and state.durable do
+      # Persist the safe point without spawning a task whose only possible result
+      # is `:ok`. Non-durable runs keep the task because terminal observation
+      # timing and the release path depend on it.
+      case Knotra.Durable.persist(%{state | stage: :observation}) do
+        {:ok, recorded} -> consume({:ok, :ok}, recorded)
+        {:error, reason} -> block_durable(state, reason)
+      end
+    else
+      snapshot = public(state)
+      launch(state, :observation, fn -> module.record(snapshot, opts) end)
+    end
   end
+
+  defp noop_observer?(Knotra.Observers.Send, nil), do: true
+  defp noop_observer?(_module, _opts), do: false
 
   defp finish(state, status, value) do
     {status, value} =
@@ -353,6 +396,8 @@ defmodule Knotra.Execution do
            match?(%{operation: %{status: :dispatching}}, state[:approval]),
          do: {:blocked, :uncertain_effect},
          else: {status, value}
+
+    {value, reason} = durable_failure(state, status, value)
 
     Process.cancel_timer(state.timer)
 
@@ -363,7 +408,9 @@ defmodule Knotra.Execution do
         error: if(status != :completed, do: value)
     }
 
-    state = event(state, status, %{output: state.output, error: state.error})
+    data = %{output: state.output, error: state.error}
+    data = if reason, do: Map.put(data, :reason, reason), else: data
+    state = event(state, status, data)
 
     if state.durable do
       case Knotra.Durable.persist(%{state | stage: :terminal_observation}) do
@@ -380,6 +427,22 @@ defmodule Knotra.Execution do
       }
     end
   end
+
+  # Host plugins may return any atom from `{:error, atom}`. Durable snapshots must
+  # still decode in a fresh VM, so an unknown code becomes the stable
+  # `:plugin_error` and the original atom is recorded as a nonsecret binary in the
+  # terminal event. Non-durable runs keep the host's atom unchanged.
+  defp durable_failure(%{durable: nil}, _status, value), do: {value, nil}
+
+  defp durable_failure(_state, status, value) when status in [:failed, :blocked, :cancelled] do
+    cond do
+      Knotra.Checkpoint.portable_atom?(value) -> {value, nil}
+      is_atom(value) -> {:plugin_error, Atom.to_string(value)}
+      true -> {:invalid_plugin_result, nil}
+    end
+  end
+
+  defp durable_failure(_state, _status, value), do: {value, nil}
 
   defp launch(state, stage, fun) do
     case Knotra.Durable.persist(%{state | stage: stage}) do
@@ -464,14 +527,16 @@ defmodule Knotra.Execution do
   end
 
   defp event(state, type, data) do
+    sequence = state.next_sequence + 1
+
     entry = %{
-      sequence: length(state.events) + 1,
+      sequence: sequence,
       elapsed_ms: System.monotonic_time(:millisecond) - state.started_at,
       type: type,
       data: data
     }
 
-    %{state | events: [entry | state.events]}
+    %{state | events: [entry | state.events], next_sequence: sequence}
   end
 
   defp count(state, key), do: update_in(state.counts[key], &(&1 + 1))
@@ -513,14 +578,6 @@ defmodule Knotra.Execution do
   # length/1 is a guard BIF: improper tails fail the guard instead of raising.
   defp proper_list?(value) when is_list(value) and length(value) >= 0, do: true
   defp proper_list?(_), do: false
-
-  # Durable runs resolve one pending call per reply. A zero-call reply is allowed
-  # to ask a new input request or to finish an answered clarification continuation
-  # (which executes no tool) as well as to finish after an effect.
-  defp zero_call_allowed?(reply, state) do
-    state.counts.tools > 0 or reply.input_request != nil or
-      match?(%{disposition: :answered}, state.input_request)
-  end
 
   defp valid_reply?(reply, state) do
     previous_ids = for exchange <- state.exchanges, call <- exchange.reply.calls, do: call.id
@@ -584,6 +641,13 @@ defmodule Knotra.Execution do
     {:ok, saved} = Knotra.Checkpoint.decode(state.durable.row.checkpoint)
     {:ok, snapshot} = Knotra.Checkpoint.decode(state.durable.row.snapshot)
     {:ok, tools} = tool_definitions(state.definition, true)
+
+    prepared =
+      case prepare_tools(state.definition, tools) do
+        {:ok, prepared} -> prepared
+        {:error, _reason} -> nil
+      end
+
     Process.cancel_timer(state.timer)
     now = System.monotonic_time(:millisecond)
 
@@ -614,7 +678,9 @@ defmodule Knotra.Execution do
       )
       |> Map.merge(%{
         events: Enum.reverse(snapshot.events),
+        next_sequence: length(snapshot.events),
         tool_definitions: tools,
+        prepared_tools: prepared,
         started_at: now - elapsed,
         deadline_at: now + remaining,
         timer: Process.send_after(self(), :deadline, remaining)
@@ -709,10 +775,57 @@ defmodule Knotra.Execution do
   defp setup definition, durable do
     {loop, opts} = definition.loop
 
-    with {:ok, tools} <- tool_definitions(definition, durable) do
-      {:ok, tools, loop.init(opts)}
+    with {:ok, tools} <- tool_definitions(definition, durable),
+         {:ok, prepared} <- prepare_tools(definition, tools) do
+      {:ok, tools, prepared, loop.init(opts)}
     end
   end
+
+  defp prepare_tools(definition, tools) do
+    {model, _} = definition.model
+
+    if function_exported?(model, :prepare_tools, 1) do
+      case model.prepare_tools(tools) do
+        {:ok, prepared} -> {:ok, prepared}
+        {:error, reason} when is_atom(reason) -> {:error, reason}
+        {:error, _reason} -> {:error, :invalid_plugin_result}
+        _other -> {:error, :invalid_plugin_result}
+      end
+    else
+      {:ok, nil}
+    end
+  end
+
+  @doc false
+  def validate(definition, input, opts, durable \\ false) do
+    if valid_options?(definition, input, opts) do
+      tools =
+        try do
+          tool_definitions(definition, durable)
+        rescue
+          _ -> {:error, :invalid_tool_definitions}
+        end
+
+      prepared =
+        with {:ok, tools} <- tools do
+          try do
+            prepare_tools(definition, tools)
+          rescue
+            _ -> {:error, :invalid_plugin_result}
+          end
+        end
+
+      with {:ok, _tools} <- tools,
+           {:ok, _prepared} <- prepared do
+        :ok
+      end
+    else
+      {:error, :invalid_configuration}
+    end
+  end
+
+  defp instance_name({:via, Registry, {instance, :tasks}}), do: instance
+  defp instance_name(_), do: nil
 
   @doc false
   def tool_definitions(definition, durable) do
@@ -745,6 +858,8 @@ defmodule Knotra.Execution do
       plugin?(definition.tool_runtime, execute: 4) and plugin?(definition.observer, record: 2) and
       Keyword.keyword?(opts) and
       Enum.all?(opts, fn {key, value} ->
+        # Zero is a legal boundary budget: the execution fails deterministically at
+        # the corresponding limit (`:turn_limit`, `:tool_limit`, `:step_limit`).
         Keyword.has_key?(@defaults, key) and is_integer(value) and value >= 0 and
           (key != :timeout or value > 0)
       end)
