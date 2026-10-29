@@ -153,7 +153,7 @@ defmodule Knotra.Observability do
   @doc false
   def register(state) do
     if state.instance do
-      meta = meta(state)
+      meta = state.observability_meta
 
       Store.record(
         state.instance,
@@ -168,7 +168,7 @@ defmodule Knotra.Observability do
   def record_event(state, entry) do
     if state.instance do
       attrs = state_attrs(state)
-      Store.record(state.instance, {:event, meta(state), attrs, entry})
+      Store.record(state.instance, {:event, state.observability_meta, attrs, entry})
     end
 
     :ok
@@ -192,17 +192,6 @@ defmodule Knotra.Observability do
       observation_error: state.observation_error,
       approval: Map.get(state, :approval),
       input_request: Map.get(state, :input_request)
-    }
-  end
-
-  @doc false
-  def meta(state) do
-    %{
-      id: state.id,
-      definition: state.definition_meta,
-      trace: state.trace,
-      input: state.input,
-      started_at: state.started_at_system
     }
   end
 

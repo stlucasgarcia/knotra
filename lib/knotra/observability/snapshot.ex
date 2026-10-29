@@ -236,6 +236,7 @@ defmodule Knotra.Observability.Snapshot do
     records
     |> Enum.flat_map(fn record ->
       record.events
+      |> Enum.take(limit)
       |> Enum.filter(&(&1.type in @message_events))
       |> Enum.map(&message(record, &1))
     end)

@@ -54,6 +54,15 @@ defmodule Knotra.Execution do
         observation_error: nil
       }
 
+      state =
+        Map.put(state, :observability_meta, %{
+          id: state.id,
+          definition: state.definition_meta,
+          trace: state.trace,
+          input: state.input,
+          started_at: state.started_at_system
+        })
+
       Knotra.Observability.register(state)
 
       {:ok, initialize(state, durable)}
