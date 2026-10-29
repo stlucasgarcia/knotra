@@ -25,8 +25,23 @@ defmodule Knotra.Observability.Store do
 
   @doc false
   def record(instance, message) when is_atom(instance) do
+    key = {__MODULE__, instance}
+
     try do
-      GenServer.cast(via(instance), message)
+      case Process.get(key) do
+        pid when is_pid(pid) ->
+          send(pid, {:"$gen_cast", message})
+
+        _ ->
+          case GenServer.whereis(via(instance)) do
+            pid when is_pid(pid) ->
+              Process.put(key, pid)
+              GenServer.cast(pid, message)
+
+            _ ->
+              :ok
+          end
+      end
     catch
       _, _ -> :ok
     end
