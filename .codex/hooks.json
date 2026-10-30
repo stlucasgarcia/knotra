@@ -6,8 +6,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "[ ! -f '/Users/stlg/.agents/skills/impeccable/scripts/impeccable' ] || '/Users/stlg/.agents/skills/impeccable/scripts/impeccable' hook",
-            "commandWindows": "cmd /c if exist \"\\Users\\stlg\\.agents\\skills\\impeccable\\scripts\\impeccable.cmd\" \"\\Users\\stlg\\.agents\\skills\\impeccable\\scripts\\impeccable.cmd\" hook",
+            "command": "[ ! -f \"$HOME/.agents/skills/impeccable/scripts/impeccable\" ] || \"$HOME/.agents/skills/impeccable/scripts/impeccable\" hook",
+            "commandWindows": "cmd /c if exist \"%USERPROFILE%\\.agents\\skills\\impeccable\\scripts\\impeccable.cmd\" \"%USERPROFILE%\\.agents\\skills\\impeccable\\scripts\\impeccable.cmd\" hook",
             "timeout": 5,
             "statusMessage": "Checking UI changes"
           }
@@ -19,8 +19,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "[ ! -f '/Users/stlg/.agents/skills/impeccable/scripts/impeccable' ] || '/Users/stlg/.agents/skills/impeccable/scripts/impeccable' hook",
-            "commandWindows": "cmd /c if exist \"\\Users\\stlg\\.agents\\skills\\impeccable\\scripts\\impeccable.cmd\" \"\\Users\\stlg\\.agents\\skills\\impeccable\\scripts\\impeccable.cmd\" hook",
+            "command": "[ ! -f \"$HOME/.agents/skills/impeccable/scripts/impeccable\" ] || \"$HOME/.agents/skills/impeccable/scripts/impeccable\" hook",
+            "commandWindows": "cmd /c if exist \"%USERPROFILE%\\.agents\\skills\\impeccable\\scripts\\impeccable.cmd\" \"%USERPROFILE%\\.agents\\skills\\impeccable\\scripts\\impeccable.cmd\" hook",
             "timeout": 30,
             "statusMessage": "Design deep pass"
           }
