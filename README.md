@@ -5,7 +5,9 @@ An embedded, plugin-driven Elixir agent harness for background work and an opt-i
 **Neither path is production-ready.** `start/5` is the milestone-1 in-memory,
 read-only path. [Durable approvals](docs/durable-approvals.md) adds a bounded
 SQLite/fake-operation slice with pending approvals and input requests through
-optional Ecto/Ecto SQL and a host-owned Repo.
+optional Ecto/Ecto SQL and a host-owned Repo. Durable records can be listed and
+deleted through `Knotra.list/3` and `Knotra.close/3`, authorized by the host's
+`:inspect` and `:close` actions.
 See [ADR 0001](docs/adr/0001-ecto-sqlite-persistence.md) for the approved persistence
 dependency exception; other dependencies still require authorization.
 
@@ -50,10 +52,124 @@ in prompts. `start/5` returns a local process handle, **not durable acceptance**
 The observer optionally sends `{:knotra, snapshot}` messages to the supplied PID.
 A terminal snapshot has status `:completed`, `:failed`, or `:cancelled`.
 
+Composition and tool definitions are validated before the process starts:
+duplicate tool names, malformed definitions and write-only tools on the ordinary
+path return `{:error, :invalid_tool_definitions}`, and invalid model/loop/observer
+plugins return `{:error, :invalid_configuration}`. A completed model reply must
+contain non-empty text; otherwise the execution fails with `:empty_response`.
+
 Capacity includes retained terminal handles: explicitly release them to free a
 slot. Over-capacity requests return `{:error, :max_children}`; there is no queue.
-Snapshots disappear when their execution process or host stops. IDs are unique
-only within the current BEAM instance, not durable global identifiers.
+`snapshot/1`, `cancel/1` and `release/1` return `{:error, :not_found}` for a handle
+that was already released or terminated. Snapshots disappear when their execution
+process or host stops. IDs are unique only within the current BEAM instance, not
+durable global identifiers.
+
+## Observability dashboard (Phoenix LiveView)
+
+Every instance owns a bounded, in-memory observability store. It records agent
+definitions and models, execution status, counters, the full event timeline
+(input, model text, tool calls and results, usage, approvals, failures), and the
+messages exchanged during each run. The store is a debugging surface, not a
+durable audit log: it does not survive a BEAM restart.
+
+```elixir
+{Knotra,
+ name: MyApp.Agents,
+ max_executions: 20,
+ observability: [max_records: 200, max_events: 2_000, notify_ms: 100]}
+```
+
+Add `{:phoenix_live_view, "~> 1.1"}` to the host and mount the dashboard inside a
+protected browser pipeline:
+
+```elixir
+# router.ex
+import Phoenix.LiveView.Router
+import Knotra.Dashboard.Router
+
+scope "/" do
+  pipe_through [:browser, :require_admin]
+
+  knotra_dashboard "/knotra",
+    instance: MyApp.Agents,
+    on_mount: [{MyAppWeb.AdminAuth, :default}]
+end
+```
+
+The route renders execution inputs, model text, and tool arguments. Router plugs
+run only for the initial HTTP request; `on_mount` runs again on every connected
+mount, including reconnects, so it must enforce the same authorization there.
+The library does not provide access control. `Knotra.Dashboard.available?/0`
+reports whether the LiveView modules were compiled into the build.
+
+The dashboard has five surfaces:
+
+- **Overview** - counters, active executions, agent definitions and their models,
+  and the newest messages.
+- **Executions** - filterable table with status, agent, model, total run duration,
+  last-turn duration, counters, and input; selecting a row opens the full event
+  timeline, per-turn timings, and run totals.
+- **Agents** - definitions aggregated by version, with model, tools, loop, tool
+  runtime, observer, run counts, and execution links.
+- **Topology** - conversations ordered oldest-first, agent-to-agent handoffs, and
+  explicit links between executions.
+- **Messages** - a cross-execution feed of inputs, assistant replies, tool
+  results, human answers, and failures.
+
+### Correlating work
+
+Non-durable executions accept a `:trace` option:
+
+```elixir
+Knotra.start(MyApp.Agents, definition, input, context,
+  trace: %{
+    agent: "concierge",
+    conversation_id: "conversation-42",
+    parent_id: parent_execution_id,
+    labels: %{"channel" => "support"}
+  })
+```
+
+Durable executions are annotated after `Knotra.submit/6` returns their id, and
+hosts can record an edge they know about explicitly:
+
+```elixir
+Knotra.Observability.annotate(MyApp.Agents, execution_id, %{
+  agent: "researcher",
+  conversation_id: "conversation-42"
+})
+
+Knotra.Observability.link(MyApp.Agents, parent_id, child_id, label: "handoff")
+```
+
+`conversation_id` groups executions into one flow; `parent_id` adds a directed
+edge; `agent` overrides the definition version as the display label; `labels`
+are shown in the execution detail. Topology derives agent-to-agent edges from
+both explicit links and consecutive executions sharing a conversation.
+
+Each execution summary includes a `timings` map: `total_ms`, `turn_count`,
+`last_turn_ms`, `avg_turn_ms`, `slowest_turn_ms`, `model_ms`, and `tool_ms`.
+`Knotra.Observability.execution/2` additionally returns the per-turn rows: turn
+number, wall duration, model latency, completed tool time, other overhead, tool
+call count, and reported usage.
+
+The same data is available without LiveView:
+
+```elixir
+Knotra.Observability.snapshot(MyApp.Agents)
+Knotra.Observability.agents(MyApp.Agents)
+Knotra.Observability.executions(MyApp.Agents)
+Knotra.Observability.execution(MyApp.Agents, id)
+Knotra.Observability.messages(MyApp.Agents, message_limit: 100)
+Knotra.Observability.graph(MyApp.Agents)
+Knotra.Observability.stats(MyApp.Agents)
+```
+
+Retention evicts the oldest terminal execution first; running executions are
+never evicted. `:max_records` and `:max_events` accept `:infinity`. Model and tool
+options, authorization context, and private continuations are never copied into
+the store. Inputs and outputs may still contain confidential data.
 
 ## Host tools: validation before authorization before execution
 
@@ -191,7 +307,9 @@ See [the architecture and future workflow scenarios](ARCHITECTURE.md),
 [the milestone-1 design](docs/design.md), and
 [the historical alternatives research](docs/research/elixir-agent-alternatives.md).
 The runnable Phoenix LiveView example host lives in
-[`examples/knotra_bots`](examples/knotra_bots).
+[`examples/knotra_bots`](examples/knotra_bots): a minimal agentic chat POC where
+humans and agents share channels, mention each other, and answer inline approval
+or clarification gates.
 The opt-in approval subset, the restart-safe clarification (input request)
 slice, and the narrow idempotent fake-recovery contract are implemented as
 documented above. Takeover, structured UI, voice, delegation and generated-code

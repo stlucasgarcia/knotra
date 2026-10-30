@@ -12,11 +12,18 @@ if Code.ensure_loaded?(Ecto.Schema) and Code.ensure_loaded?(Ecto.Migration) do
       field(:status, :string, default: "accepted")
       field(:checkpoint, :binary)
       field(:snapshot, :binary)
+      field(:inserted_at, :utc_datetime_usec)
     end
   end
 
   defmodule Knotra.Persistence.Migration do
-    @moduledoc "Host-applied initial migration. Never run automatically by Knotra."
+    @moduledoc """
+    Host-applied initial migration. Never run automatically by Knotra.
+
+    Hosts that applied an earlier revision of this module must add the
+    `inserted_at` column and both indexes manually; see
+    `docs/durable-approvals.md`.
+    """
     use Ecto.Migration
 
     def change do
@@ -30,9 +37,12 @@ if Code.ensure_loaded?(Ecto.Schema) and Code.ensure_loaded?(Ecto.Migration) do
         add(:status, :string, null: false, default: "accepted")
         add(:checkpoint, :binary, null: false)
         add(:snapshot, :binary, null: false)
+        add(:inserted_at, :utc_datetime_usec)
       end
 
       create(unique_index(:knotra_executions, [:tenant, :submission_key]))
+      create(index(:knotra_executions, [:status]))
+      create(index(:knotra_executions, [:tenant, :inserted_at]))
     end
   end
 
@@ -43,6 +53,7 @@ if Code.ensure_loaded?(Ecto.Schema) and Code.ensure_loaded?(Ecto.Migration) do
 
     def accept(repo, attributes, max_pending \\ :infinity) do
       protect(fn ->
+        attributes = Map.put(attributes, :inserted_at, DateTime.utc_now())
         insert_accepted(repo, attributes, max_pending)
 
         row =
@@ -88,7 +99,8 @@ if Code.ensure_loaded?(Ecto.Schema) and Code.ensure_loaded?(Ecto.Migration) do
             request_hash: type(^attributes.request_hash, :binary),
             composition: type(^attributes.composition, :binary),
             checkpoint: type(^attributes.checkpoint, :binary),
-            snapshot: type(^attributes.snapshot, :binary)
+            snapshot: type(^attributes.snapshot, :binary),
+            inserted_at: type(^attributes.inserted_at, :utc_datetime_usec)
           }
         )
 
@@ -104,6 +116,51 @@ if Code.ensure_loaded?(Ecto.Schema) and Code.ensure_loaded?(Ecto.Migration) do
         case repo.get_by(Record, [tenant: tenant, id: id], log: false) do
           nil -> {:error, :not_found}
           row -> {:ok, row}
+        end
+      end)
+    end
+
+    def list(repo, tenant, status, limit) do
+      protect(fn ->
+        query =
+          from(r in Record,
+            where: r.tenant == ^tenant,
+            order_by: [desc: r.inserted_at, desc: r.id],
+            limit: ^limit
+          )
+
+        query = if status, do: where(query, [r], r.status == ^status), else: query
+        {:ok, repo.all(query, log: false)}
+      end)
+    end
+
+    @doc false
+    def list_window(repo, tenant, statuses, limit, offset) do
+      protect(fn ->
+        query =
+          from(r in Record,
+            where: r.tenant == ^tenant and r.status in ^statuses,
+            order_by: [desc: r.inserted_at, desc: r.id],
+            limit: ^limit,
+            offset: ^offset
+          )
+
+        {:ok, repo.all(query, log: false)}
+      end)
+    end
+
+    def delete(repo, row, allowed_statuses) do
+      protect(fn ->
+        query =
+          from(r in Record,
+            where:
+              r.id == ^row.id and r.tenant == ^row.tenant and r.revision == ^row.revision and
+                r.status in ^allowed_statuses
+          )
+
+        case repo.delete_all(query, log: false) do
+          {1, _} -> :ok
+          {0, _} -> {:error, :stale_execution}
         end
       end)
     end
@@ -140,6 +197,7 @@ if Code.ensure_loaded?(Ecto.Schema) and Code.ensure_loaded?(Ecto.Migration) do
       try do
         fun.()
       rescue
+        error in [MatchError, Ecto.QueryError] -> reraise(error, __STACKTRACE__)
         _ -> {:error, :persistence_unavailable}
       catch
         :exit, _ -> {:error, :persistence_unavailable}

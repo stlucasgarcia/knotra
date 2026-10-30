@@ -152,6 +152,48 @@ defmodule KnotraTest do
     end
   end
 
+  defmodule WriteTool do
+    @behaviour Knotra.Tool
+    @impl true
+    def definition, do: Map.put(Receipt.definition(), :read_only, false)
+    @impl true
+    def validate(args), do: Receipt.validate(args)
+    @impl true
+    def authorize(_args, _context), do: :ok
+    @impl true
+    def call(_args, _context), do: {:ok, "write"}
+  end
+
+  defmodule ThrowingTool do
+    @behaviour Knotra.Tool
+    @impl true
+    def definition, do: throw(:boom)
+    @impl true
+    def validate(args), do: Receipt.validate(args)
+    @impl true
+    def authorize(_args, _context), do: :ok
+    @impl true
+    def call(_args, _context), do: {:ok, "unreachable"}
+  end
+
+  defmodule NormalizingReceipt do
+    @behaviour Knotra.Tool
+    @impl true
+    def definition, do: Receipt.definition()
+
+    @impl true
+    def validate(%{"id" => id} = args) when is_binary(id),
+      do: {:ok, Map.put(args, "normalized", true)}
+
+    def validate(_args), do: {:error, :invalid_arguments}
+
+    @impl true
+    def authorize(_args, _context), do: :ok
+
+    @impl true
+    def call(%{"id" => id}, _context), do: {:ok, "read " <> id}
+  end
+
   setup do
     start_supervised!({Knotra, name: __MODULE__, max_executions: 2})
 
@@ -622,6 +664,70 @@ defmodule KnotraTest do
     assert record.status == :failed
     assert record.error == :input_not_supported
     refute_receive {:receipt_read, _, _}
+    assert :ok = Knotra.release(execution)
+  end
+
+  test "released handles return error tuples instead of exiting", %{auth: auth} do
+    agent = definition(fn _ -> {:ok, %Reply{text: "done"}} end)
+    {:ok, execution} = Knotra.start(__MODULE__, agent, "Email", auth)
+    assert %{status: :completed} = complete(execution)
+    assert :ok = Knotra.release(execution)
+
+    assert {:error, :not_found} = Knotra.snapshot(execution)
+    assert {:error, :not_found} = Knotra.cancel(execution)
+    assert {:error, :not_found} = Knotra.release(execution)
+  end
+
+  test "invalid tool definitions are rejected before a process starts", %{auth: auth} do
+    respond = fn _ -> flunk("model must not run") end
+
+    duplicate = definition(respond, tools: [Receipt, Receipt])
+
+    assert {:error, :invalid_tool_definitions} =
+             Knotra.start(__MODULE__, duplicate, "Email", auth)
+
+    write_only = definition(respond, tools: [WriteTool])
+
+    assert {:error, :invalid_tool_definitions} =
+             Knotra.start(__MODULE__, write_only, "Email", auth)
+  end
+
+  test "a tool definition that throws returns an error instead of crashing the caller", %{
+    auth: auth
+  } do
+    respond = fn _ -> flunk("model must not run") end
+
+    assert {:error, :invalid_tool_definitions} =
+             Knotra.start(__MODULE__, definition(respond, tools: [ThrowingTool]), "Email", auth)
+  end
+
+  test "empty model output fails closed", %{auth: auth} do
+    agent = definition(fn _ -> {:ok, %Reply{text: "   "}} end)
+    {:ok, execution} = Knotra.start(__MODULE__, agent, "Email", auth)
+
+    assert %{status: :failed, error: :empty_response} = complete(execution)
+    assert :ok = Knotra.release(execution)
+  end
+
+  test "tool results record the arguments the runtime actually used", %{auth: auth} do
+    agent =
+      definition(
+        fn
+          %{exchanges: []} -> {:ok, %Reply{calls: [call()]}}
+          _ -> {:ok, %Reply{text: "done"}}
+        end,
+        tools: [NormalizingReceipt]
+      )
+
+    {:ok, execution} = Knotra.start(__MODULE__, agent, "Email", auth)
+    record = complete(execution)
+    assert %{status: :completed} = record
+
+    assert Enum.any?(record.events, fn
+             %{type: :tool_result, data: %{call: %{arguments: %{"normalized" => true}}}} -> true
+             _ -> false
+           end)
+
     assert :ok = Knotra.release(execution)
   end
 end

@@ -34,7 +34,8 @@ defmodule Knotra.Checkpoint do
     task_exit invalid_plugin_result observer_failed observer_timeout
     unsupported_checkpoint checkpoint_too_large stale_execution persistence_unavailable
     persistence_failed incompatible_checkpoint interrupted unknown_tool
-    write_tool_not_supported forbidden invalid_arguments model_error
+    write_tool_not_supported forbidden invalid_arguments model_error plugin_error
+    unsupported_arguments not_closeable not_found unavailable
     unsupported_tool_call incomplete_response empty_response provider_unavailable
     temporarily_unavailable answered_version decision responder_id approve reject rejected approval_rejected
     approved operation decided dispatching succeeded result not_dispatched dispatch_not_started
@@ -46,6 +47,11 @@ defmodule Knotra.Checkpoint do
     bedrock google_vertex vertex quantity component kind count tool_usage image_usage
   )a
 
+  # Literal vocabulary is loaded with this module in every fresh VM. Being an
+  # existing atom in the writer VM is not proof that a checkpoint is portable.
+  # Arbitrary model metadata should use string keys/values, not dynamic atoms.
+  @portable_atom_lookup Map.new(@portable_atoms, &{&1, true})
+
   # Only inert data, never functions, processes, ports or references. Do not decode
   # arbitrary Erlang terms, create atoms, or serialize the execution process state.
   def encode(value) do
@@ -56,6 +62,39 @@ defmodule Knotra.Checkpoint do
       {:error, :unsupported_checkpoint}
     end
   end
+
+  @doc false
+  def portable_atom?(value) when is_atom(value),
+    do: is_map_key(@portable_atom_lookup, value)
+
+  def portable_atom?(_), do: false
+
+  # Best-effort conversion of inert metadata (provider usage, model details) into
+  # checkpoint-portable data. Atoms outside the fresh-VM vocabulary become strings
+  # so a restart never depends on the writer VM's atom history. Functions, pids,
+  # ports, references and unreadable terms are left untouched and still rejected by
+  # `encode/1`.
+  def portable(value) when is_atom(value) do
+    if portable_atom?(value), do: value, else: Atom.to_string(value)
+  end
+
+  def portable(value) when is_binary(value) or is_number(value), do: value
+
+  def portable(%module{} = value) when module in @structs, do: value
+
+  def portable(%_{} = value), do: value |> Map.from_struct() |> portable()
+
+  def portable(value) when is_map(value) do
+    Map.new(value, fn {key, item} -> {portable(key), portable(item)} end)
+  end
+
+  def portable(value) when is_list(value), do: Enum.map(value, &portable/1)
+
+  def portable(value) when is_tuple(value) do
+    value |> Tuple.to_list() |> Enum.map(&portable/1) |> List.to_tuple()
+  end
+
+  def portable(value), do: value
 
   def decode(bytes) when is_binary(bytes) and byte_size(bytes) <= @max_bytes do
     Enum.each(@structs, &Code.ensure_loaded/1)
@@ -70,7 +109,7 @@ defmodule Knotra.Checkpoint do
 
   def decode(_), do: {:error, :unsupported_checkpoint}
 
-  defp data?(value) when is_atom(value), do: value in @portable_atoms
+  defp data?(value) when is_atom(value), do: portable_atom?(value)
   defp data?(value) when is_binary(value) or is_number(value), do: true
   defp data?([]), do: true
   defp data?([head | tail]), do: data?(head) and list?(tail)
