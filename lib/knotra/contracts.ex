@@ -103,6 +103,18 @@ defmodule Knotra.ToolRuntime do
               | {:ok, map(), String.t()}
               | {:error, atom()}
               | {:retry, atom()}
+
+  @doc """
+  Whether this runtime enforces its own policy for declared write tools.
+
+  Only a runtime that implements this and returns `true` may execute a
+  `read_only: false` tool on the non-durable path. The runtime is then
+  responsible for validating, authorizing and either executing the call or
+  returning a failure before any effect.
+  """
+  @callback supports_writes?() :: boolean()
+
+  @optional_callbacks supports_writes?: 0
 end
 
 defmodule Knotra.Observer do

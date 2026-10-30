@@ -1,25 +1,19 @@
-defmodule KnotraBots.Tools.Lookup do
+defmodule KnotraBots.Tools.CustomerLookup do
   @moduledoc """
-  Read-only order lookup over a tiny hardcoded map.
+  Read-only customer lookup: tier, lifetime value, contact and recent orders.
 
-  The host owns the scope; tenant identity comes from `authorize/2`, never from
-  model-supplied arguments. The durable runtime still records a bound approval
-  before this call; because the definition is `read_only: true`, the demo's chat
-  relay answers it immediately and a human is never asked.
+  Accepts a customer id, email, name fragment or order id.
   """
 
   @behaviour Knotra.Tool
 
-  @orders %{
-    "ord-1" => "Order ord-1 shipped and arrives Tuesday.",
-    "ord-2" => "Order ord-2 is processing and ships Friday."
-  }
+  alias KnotraBots.Commerce
 
   @impl true
   def definition do
     %{
-      name: "lookup",
-      description: "Look up an order's status (read-only)",
+      name: "customer_lookup",
+      description: "Look up a customer by id, email, name or order id (read-only)",
       read_only: true,
       parameters: %{
         "type" => "object",
@@ -44,6 +38,19 @@ defmodule KnotraBots.Tools.Lookup do
 
   @impl true
   def call(%{"query" => query}, _scope) do
-    {:ok, Map.get(@orders, query, "No order record matches #{inspect(query)}.")}
+    case Commerce.find_customer(query) do
+      {customer_id, _customer} ->
+        {:ok, Commerce.customer_summary(customer_id)}
+
+      nil ->
+        lookup_by_order(query)
+    end
+  end
+
+  defp lookup_by_order(query) do
+    case Commerce.order(query) do
+      nil -> {:ok, "No customer matches #{inspect(query)}."}
+      order -> {:ok, Commerce.customer_summary(order.customer)}
+    end
   end
 end

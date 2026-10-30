@@ -20,6 +20,7 @@ defmodule KnotraBotsWeb.Router do
     live "/channels", ChannelsLive, :index
     live "/channels/:id", ChatLive, :show
     live "/agents", AgentsLive, :index
+    live "/swarm", SwarmLive, :index
   end
 
   scope "/" do

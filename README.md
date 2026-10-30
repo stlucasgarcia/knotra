@@ -103,7 +103,7 @@ mount, including reconnects, so it must enforce the same authorization there.
 The library does not provide access control. `Knotra.Dashboard.available?/0`
 reports whether the LiveView modules were compiled into the build.
 
-The dashboard has five surfaces:
+The dashboard has six surfaces:
 
 - **Overview** - counters, active executions, agent definitions and their models,
   and the newest messages.
@@ -112,6 +112,9 @@ The dashboard has five surfaces:
   timeline, per-turn timings, and run totals.
 - **Agents** - definitions aggregated by version, with model, tools, loop, tool
   runtime, observer, run counts, and execution links.
+- **Swarms** - coordinator runs with planner input/output, created agents and
+  their prompts/tools, assigned tasks, escalations, member executions, and one
+  merged timeline of coordinator and member events.
 - **Topology** - conversations ordered oldest-first, agent-to-agent handoffs, and
   explicit links between executions.
 - **Messages** - a cross-execution feed of inputs, assistant replies, tool
@@ -244,6 +247,62 @@ and tool runtime. General recovery of arbitrary plugin state and distributed
 ownership remain unsupported. The test-only `MemoryRecorder` demonstrates an
 in-memory observer store; it is not a durable persistence adapter.
 
+## Swarms
+
+`Knotra.Swarm` runs one objective as a coordinated group of ordinary non-durable
+executions. Each member is a `Knotra.Execution` process started through the host
+instance, so a swarm costs BEAM processes and shares the instance's
+`:max_executions` capacity — no OS thread per agent.
+
+```elixir
+{:ok, result} =
+  Knotra.Swarm.run(MyApp.Instance, %Knotra.Swarm.Spec{
+    mode: :fan_out,
+    goal: "summarize the release notes",
+    agents: [%Knotra.Swarm.Agent{name: "researcher", definition: definition}],
+    tasks: [%{id: "risks", input: "list the risks"}]
+  })
+```
+
+| Mode | Coordination |
+|---|---|
+| `:fan_out` | Given or decomposed tasks; agents assigned round-robin; parts merged by `:merge` |
+| `:board` | One shared ETS board; members claim tasks atomically and self-select until empty |
+| `:debate` | Every agent attempts the goal; `:select` picks one attempt or merges them |
+| `:coordinator` | A host `:plan` function may create ephemeral agents and assign tasks by name; caps and a write policy are enforced before work starts |
+
+`merge/2` and `select/2` are replaceable functions (`fun`, `{module, function}`,
+or `{module, function, extra_args}`); the defaults join completed parts and pick
+the longest attempt. A partial swarm still finishes its healthy work and returns
+`{:error, {:incomplete, result}}`, because the root cannot report success while a
+required part failed. `:timeout` bounds the whole swarm; a fired deadline cancels
+and releases every member.
+
+`:coordinator` calls `:plan` with `(goal, agents)`. The plan may return
+`%{agents: [%Knotra.Swarm.Agent{}], tasks: [task]}`; each task may name an
+`:agent` and a `:depth`. `:max_created_agents`, `:max_tasks` and `:max_depth` are
+validated before admission, so an over-limit plan starts no executions.
+`:write_policy` is consulted by the swarm tool runtime for every declared write
+tool: `:approve` executes once, `:reject` performs nothing, and
+`{:escalate, reason}` records the call in `result.escalations` and performs
+nothing. A tool runtime must implement `supports_writes?/0` for write tools to be
+admissible on the non-durable path. Results expose `:created_agents`,
+`:agent_details` (prompt, tools, version, created flag) and `:escalations`; each
+result part carries an `:iteration`.
+
+Every member is traced into the instance's observability store under one
+conversation per swarm (`result.swarm_id`), with the agent name and `mode`/`part`
+labels. Each result part also carries its `:elapsed_ms` and the execution's
+`counts`, so a slow or tool-heavy member is visible without opening a raw trace.
+
+The swarm is in-memory only: the board, ownership and results do not survive a
+host restart. Ordinary modes dispatch only declared read-only tools. Coordinator
+mode may dispatch declared write tools only through the swarm tool runtime and the
+host's `:write_policy`; escalation records are not approvals. Durable swarm
+acceptance, restart-safe boards and inboxes, and shared budget reservations
+remain planned; see
+[ARCHITECTURE.md](ARCHITECTURE.md#autonomous-work-delegation-and-swarms--planned).
+
 ## Non-durable limits, cancellation, and records
 
 - Supervised tasks run plugin callbacks; coordinators remain responsive.
@@ -297,6 +356,12 @@ requests), cancellation/expiry, preserved allowances, compatible restoration and
 explicit budgeted idempotent fake-effect recovery; see its [test lifecycle](docs/durable-approvals.md#verification-and-sqlite-test-lifecycle).
 These tests do not certify production effects or distributed ownership.
 
+The swarm layer has its own offline checks: `mix run examples/swarm_showcase.exs`
+runs all four modes and prints each merged or selected result, and
+`mix run bench/swarm_bench.exs` measures 100 concurrent agents under a fixed
+300 MB peak-RSS ceiling, failing the run when the ceiling is exceeded. Both use a
+deterministic stub model and contact no provider.
+
 For fresh-model evaluation, submit sanitized inputs with a real model plugin and
 a fixture-only tool runtime, then assess facts, permitted tool use, output shape,
 and budgets. Never reuse production tool implementations or credentials for
@@ -307,10 +372,15 @@ See [the architecture and future workflow scenarios](ARCHITECTURE.md),
 [the milestone-1 design](docs/design.md), and
 [the historical alternatives research](docs/research/elixir-agent-alternatives.md).
 The runnable Phoenix LiveView example host lives in
-[`examples/knotra_bots`](examples/knotra_bots): a minimal agentic chat POC where
-humans and agents share channels, mention each other, and answer inline approval
-or clarification gates.
+[`examples/knotra_bots`](examples/knotra_bots): an agentic **e-commerce** POC
+where humans and agents share channels over a mocked storefront, mention each
+other, and answer inline approval or clarification gates. Seeded
+`#storefront-ops` routes orders, returns, refunds and stock across four
+specialists; `/swarm` offers one-click debate, fan-out and shared-board
+scenarios, and the same run is available in a channel by sending
+`/swarm [fanout|board|debate] <goal>`.
 The opt-in approval subset, the restart-safe clarification (input request)
-slice, and the narrow idempotent fake-recovery contract are implemented as
-documented above. Takeover, structured UI, voice, delegation and generated-code
-branches remain design work, not implemented capabilities.
+slice, the narrow idempotent fake-recovery contract, and the non-durable swarm
+modes are implemented as documented above. Takeover, structured UI, voice,
+durable delegation and generated-code branches remain design work, not
+implemented capabilities.

@@ -45,7 +45,8 @@ model =
 config :knotra_bots,
   model: model,
   dashboard_token: env.("KNOTRA_BOTS_DASHBOARD_TOKEN", nil),
-  notices_path: Path.expand("../_build/notices.log", __DIR__)
+  notices_path: Path.expand("../_build/notices.log", __DIR__),
+  effects_path: Path.expand("../_build/effects.log", __DIR__)
 
 port = String.to_integer(env.("KNOTRA_BOTS_PORT", "4000"))
 

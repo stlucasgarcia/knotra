@@ -13,21 +13,106 @@ defmodule KnotraBots.Agents do
   alias KnotraBots.{Agent, ChannelAgent, Repo}
   alias KnotraBots.Tools
 
-  @tools %{"lookup" => Tools.Lookup, "notify" => Tools.Notify}
+  @tools %{
+    "order_lookup" => Tools.OrderLookup,
+    "customer_lookup" => Tools.CustomerLookup,
+    "stock_lookup" => Tools.StockLookup,
+    "return_policy" => Tools.ReturnPolicy,
+    "refund" => Tools.Refund,
+    "restock" => Tools.Restock,
+    "notify" => Tools.Notify
+  }
 
-  @assistant_prompt "You are a concise general assistant. Ask one short clarifying question when a request is ambiguous."
-  @researcher_prompt """
-  You research orders with the lookup tool. Use an order id such as ord-1.
-  When you need a detail, ask one short question. Keep replies short.
-  """
   @concierge_prompt """
-  You are the workspace concierge. For order, shipping, or lookup questions,
-  hand off to @researcher by mentioning them. For notice or message requests,
-  propose the notify operation. Keep replies short.
+  You are the Storefront Concierge for an online outdoor-apparel store.
+  Answer greetings, route specialist work, and propose a notice when asked.
+  Routing: order=@orders, shipping=@orders, customer=@orders, return=@returns, refund=@returns, stock=@inventory, restock=@inventory, inventory=@inventory.
+  Mention exactly one specialist for specialist work. Keep replies short.
   """
 
-  @doc "Host tool names an agent may offer."
-  def tool_names, do: Map.keys(@tools)
+  @orders_prompt """
+  You are the Order Desk. Use order_lookup for order status and tracking, and
+  customer_lookup for tier, lifetime value and history. Ask for an order id,
+  email or name when it is missing. Keep replies short.
+  """
+
+  @returns_prompt """
+  You are Returns. Use return_policy to check whether an order is eligible, and
+  refund to propose a refund for an eligible order. A refund is only a proposal
+  until a human approves it. Ask for an order id when it is missing. Keep replies short.
+  """
+
+  @inventory_prompt """
+  You are Inventory. Use stock_lookup for stock levels and restock to propose a
+  reorder for a low or out-of-stock SKU. Ask for a SKU or product name when it is
+  missing. Keep replies short.
+  """
+
+  @pricing_prompt """
+  You are the Pricing Strategist. Argue from margin, stock cover and price
+  elasticity. Choose one option and defend it in at most four sentences.
+  """
+
+  @retention_prompt """
+  You are the Retention Analyst. Argue from customer lifetime value, churn risk
+  and support history. Choose one option and defend it in at most four sentences.
+  """
+
+  @brand_prompt """
+  You are the Brand Voice. Argue from tone, clarity and long-term customer trust.
+  Choose one option and defend it in at most four sentences.
+  """
+
+  @seeds [
+    %{
+      id: "concierge",
+      name: "Concierge",
+      handle: "concierge",
+      prompt: @concierge_prompt,
+      tools: "notify"
+    },
+    %{
+      id: "orders",
+      name: "Order Desk",
+      handle: "orders",
+      prompt: @orders_prompt,
+      tools: "order_lookup,customer_lookup"
+    },
+    %{
+      id: "returns",
+      name: "Returns",
+      handle: "returns",
+      prompt: @returns_prompt,
+      tools: "order_lookup,return_policy,refund"
+    },
+    %{
+      id: "inventory",
+      name: "Inventory",
+      handle: "inventory",
+      prompt: @inventory_prompt,
+      tools: "stock_lookup,restock"
+    },
+    %{
+      id: "pricing",
+      name: "Pricing Strategist",
+      handle: "pricing",
+      prompt: @pricing_prompt,
+      tools: "stock_lookup"
+    },
+    %{
+      id: "retention",
+      name: "Retention Analyst",
+      handle: "retention",
+      prompt: @retention_prompt,
+      tools: "customer_lookup"
+    },
+    %{id: "brand", name: "Brand Voice", handle: "brand", prompt: @brand_prompt, tools: ""}
+  ]
+
+  @tool_names ~w(order_lookup customer_lookup stock_lookup return_policy refund restock notify)
+
+  @doc "Host tool names an agent may offer, in display order."
+  def tool_names, do: @tool_names
 
   def list, do: Repo.all(from(a in Agent, order_by: [asc: a.name]))
   def get(id), do: Repo.get(Agent, id)
@@ -39,6 +124,32 @@ defmodule KnotraBots.Agents do
       version: "agent-#{agent.id}-r#{agent.revision}",
       model: model(agent),
       tools: tool_modules(agent),
+      observer: {Knotra.Observers.Send, nil}
+    }
+  end
+
+  @doc """
+  Builds an ephemeral definition for a coordinator-created swarm agent.
+
+  The definition uses the configured model and only tools named in the host
+  registry. A coordinator plan can therefore synthesize behavior without
+  inventing modules or bypassing the host's tool surface.
+  """
+  def synthetic_definition(name, handle, prompt, tool_names)
+      when is_binary(name) and is_binary(handle) and is_binary(prompt) and is_list(tool_names) do
+    agent = %Agent{
+      id: "synthetic-" <> Agent.slug(name),
+      name: name,
+      handle: handle,
+      system_prompt: prompt,
+      model: KnotraBots.configured_model(),
+      tools: Enum.join(tool_names, ",")
+    }
+
+    %Knotra.Definition{
+      version: "swarm-#{Agent.slug(name)}-v1",
+      model: model(agent),
+      tools: Enum.map(tool_names, &Map.fetch!(@tools, &1)),
       observer: {Knotra.Observers.Send, nil}
     }
   end
@@ -136,6 +247,24 @@ defmodule KnotraBots.Agents do
     end
   end
 
+  @doc """
+  Builds the non-durable definition one swarm member runs with.
+
+  `Knotra.start/5` dispatches only declared read-only tools and never records an
+  approval, so write tools are dropped here. Consequential work keeps using the
+  durable chat path, where a proposal waits for a human. The version keeps the
+  swarm suffix so a member is not mistaken for a durable chat execution.
+  """
+  def swarm_definition(%Agent{} = agent) do
+    definition = definition(agent)
+
+    %{
+      definition
+      | version: definition.version <> "-swarm",
+        tools: Enum.filter(definition.tools, & &1.definition().read_only)
+    }
+  end
+
   @doc "JSON snapshot of the fields a durable definition is built from."
   def definition_snapshot(%Agent{} = agent) do
     JSON.encode!(%{
@@ -175,46 +304,31 @@ defmodule KnotraBots.Agents do
   offline agents while the default run seeds Gemini agents.
   """
   def seed! do
-    if Repo.aggregate(Agent, :count) == 0 do
-      now = NaiveDateTime.utc_now() |> NaiveDateTime.truncate(:second)
-      model = KnotraBots.configured_model()
+    now = NaiveDateTime.utc_now() |> NaiveDateTime.truncate(:second)
+    model = KnotraBots.configured_model()
 
-      Repo.insert_all(Agent, [
+    existing =
+      Repo.all(from(a in Agent, select: a.id))
+      |> MapSet.new()
+
+    rows =
+      @seeds
+      |> Enum.reject(&MapSet.member?(existing, &1.id))
+      |> Enum.map(fn seed ->
         %{
-          id: "assistant",
-          name: "Assistant",
-          handle: "assistant",
-          system_prompt: @assistant_prompt,
+          id: seed.id,
+          name: seed.name,
+          handle: seed.handle,
+          system_prompt: seed.prompt,
           model: model,
-          tools: "",
-          revision: 1,
-          inserted_at: now,
-          updated_at: now
-        },
-        %{
-          id: "researcher",
-          name: "Researcher",
-          handle: "researcher",
-          system_prompt: @researcher_prompt,
-          model: model,
-          tools: "lookup",
-          revision: 1,
-          inserted_at: now,
-          updated_at: now
-        },
-        %{
-          id: "concierge",
-          name: "Concierge",
-          handle: "concierge",
-          system_prompt: @concierge_prompt,
-          model: model,
-          tools: "notify",
+          tools: seed.tools,
           revision: 1,
           inserted_at: now,
           updated_at: now
         }
-      ])
-    end
+      end)
+
+    if rows != [], do: Repo.insert_all(Agent, rows)
 
     :ok
   end

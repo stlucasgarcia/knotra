@@ -61,6 +61,7 @@ defmodule Knotra.Observability.Store do
      %{
        instance: instance,
        records: %{},
+       swarms: %{},
        pending_annotations: %{},
        pending_seq: 0,
        terminals: :gb_sets.empty(),
@@ -72,6 +73,7 @@ defmodule Knotra.Observability.Store do
        version: 0,
        seq: 0,
        max_records: Keyword.fetch!(config, :max_records),
+       max_swarms: Keyword.fetch!(config, :max_records),
        max_events: Keyword.fetch!(config, :max_events),
        notify_ms: Keyword.fetch!(config, :notify_ms),
        message_limit: Keyword.fetch!(config, :message_limit)
@@ -91,6 +93,11 @@ defmodule Knotra.Observability.Store do
 
   def handle_cast({:update, id, attrs}, state) do
     state = state |> update_record(id, attrs) |> mark_dirty()
+    {:noreply, state}
+  end
+
+  def handle_cast({:swarm_event, id, type, data}, state) do
+    state = state |> put_swarm_event(id, type, data) |> mark_dirty()
     {:noreply, state}
   end
 
@@ -118,7 +125,8 @@ defmodule Knotra.Observability.Store do
           Snapshot.build(
             Map.values(state.records),
             links: state.links,
-            message_limit: limit
+            message_limit: limit,
+            swarms: Map.values(state.swarms)
           )
 
         cache =
@@ -132,21 +140,15 @@ defmodule Knotra.Observability.Store do
 
   def handle_call({:execution, id}, _from, state) do
     case fetch_record(state, id) do
-      {:ok, record} ->
-        events = :queue.to_list(record.events)
-        finish = record.finished_at || record.updated_at
+      {:ok, record} -> {:reply, {:ok, execution_detail(record)}, state}
+      :error -> {:reply, {:error, :not_found}, state}
+    end
+  end
 
-        record =
-          record
-          |> Map.put(:events, events)
-          |> Map.put(:duration_ms, max(finish - record.started_at, 0))
-          |> Map.put(:truncated?, record.event_count > record.retained_events)
-          |> Map.put(:timings, Knotra.Observability.Timing.summarize(events))
-
-        {:reply, {:ok, record}, state}
-
-      :error ->
-        {:reply, {:error, :not_found}, state}
+  def handle_call({:swarm, id}, _from, state) do
+    case Map.fetch(state.swarms, id) do
+      {:ok, swarm} -> {:reply, {:ok, swarm_detail(state, swarm)}, state}
+      :error -> {:reply, {:error, :not_found}, state}
     end
   end
 
@@ -190,6 +192,238 @@ defmodule Knotra.Observability.Store do
   end
 
   def handle_info(_message, state), do: {:noreply, state}
+
+  @swarm_terminal [:completed, :partial, :failed, :cancelled, :timeout]
+
+  defp put_swarm_event(state, id, type, data) do
+    now = now()
+    previous = Map.get(state.swarms, id)
+    swarm = previous || new_swarm(id, now)
+
+    swarm =
+      swarm
+      |> merge_swarm_data(type, data, now)
+      |> append_swarm_event(type, data, now, state.max_events)
+
+    %{state | swarms: Map.put(state.swarms, id, swarm)}
+    |> evict_swarms()
+  end
+
+  defp new_swarm(id, now) do
+    %{
+      id: id,
+      mode: nil,
+      goal: nil,
+      status: :running,
+      config: %{},
+      started_at: now,
+      updated_at: now,
+      finished_at: nil,
+      events: [],
+      event_count: 0,
+      planner: nil,
+      agents: [],
+      tasks: [],
+      escalations: [],
+      output: nil,
+      error: nil,
+      counts: %{}
+    }
+  end
+
+  defp merge_swarm_data(swarm, type, data, now) do
+    attrs =
+      data
+      |> Map.take([
+        :mode,
+        :goal,
+        :config,
+        :planner,
+        :agents,
+        :tasks,
+        :escalations,
+        :output,
+        :error,
+        :counts,
+        :status
+      ])
+      |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+      |> Map.new()
+
+    swarm =
+      swarm
+      |> Map.merge(attrs)
+      |> Map.put(:updated_at, now)
+      |> update_swarm_tasks(type, data)
+      |> maybe_append_escalation(type, data)
+      |> maybe_finish_swarm(type, data, now)
+
+    swarm
+  end
+
+  defp update_swarm_tasks(swarm, :planned, %{tasks: tasks}) when is_list(tasks) do
+    %{swarm | tasks: tasks}
+  end
+
+  defp update_swarm_tasks(swarm, :task_started, data) do
+    task = %{
+      id: data[:id],
+      agent: data[:agent],
+      iteration: Map.get(data, :iteration, 1),
+      input: Map.get(data, :input),
+      status: :running,
+      error: nil,
+      elapsed_ms: nil,
+      counts: nil
+    }
+
+    %{swarm | tasks: put_task(swarm.tasks, task)}
+  end
+
+  defp update_swarm_tasks(swarm, :task_finished, data) do
+    task = %{
+      id: data[:id],
+      agent: data[:agent],
+      iteration: Map.get(data, :iteration, 1),
+      input: Map.get(data, :input),
+      status: Map.get(data, :status, :failed),
+      error: Map.get(data, :error),
+      elapsed_ms: Map.get(data, :elapsed_ms),
+      counts: Map.get(data, :counts)
+    }
+
+    %{swarm | tasks: put_task(swarm.tasks, task)}
+  end
+
+  defp update_swarm_tasks(swarm, _type, _data), do: swarm
+
+  defp put_task(tasks, task) do
+    case Enum.find_index(tasks, &(&1.id == task.id)) do
+      nil -> tasks ++ [task]
+      index -> List.replace_at(tasks, index, Map.merge(Enum.at(tasks, index), task))
+    end
+  end
+
+  defp maybe_append_escalation(swarm, :escalation, data) do
+    %{swarm | escalations: [data | Enum.reject(swarm.escalations, &(&1 == data))]}
+  end
+
+  defp maybe_append_escalation(swarm, _type, _data), do: swarm
+
+  defp maybe_finish_swarm(swarm, :finished, data, now) do
+    %{swarm | status: Map.get(data, :status, swarm.status), finished_at: now}
+  end
+
+  defp maybe_finish_swarm(swarm, _type, _data, _now), do: swarm
+
+  defp append_swarm_event(swarm, type, data, now, max_events) do
+    entry = %{
+      sequence: swarm.event_count + 1,
+      at: now,
+      elapsed_ms: max(now - swarm.started_at, 0),
+      type: type,
+      data: data
+    }
+
+    events = swarm.events ++ [entry]
+
+    events =
+      if max_events == :infinity or length(events) <= max_events,
+        do: events,
+        else: Enum.take(events, -max_events)
+
+    %{swarm | events: events, event_count: swarm.event_count + 1}
+  end
+
+  defp execution_detail(record) do
+    events = :queue.to_list(record.events)
+    finish = record.finished_at || record.updated_at
+
+    record
+    |> Map.put(:events, events)
+    |> Map.put(:duration_ms, max(finish - record.started_at, 0))
+    |> Map.put(:truncated?, record.event_count > record.retained_events)
+    |> Map.put(:timings, Knotra.Observability.Timing.summarize(events))
+  end
+
+  defp swarm_detail(state, swarm) do
+    children =
+      state.records
+      |> Map.values()
+      |> Enum.filter(&(&1.trace.conversation_id == to_string(swarm.id)))
+
+    swarm =
+      swarm
+      |> Map.put(:elapsed_ms, max((swarm.finished_at || swarm.updated_at) - swarm.started_at, 0))
+      |> Map.put(:truncated?, swarm.event_count > length(swarm.events))
+
+    %{
+      swarm: swarm,
+      executions: Enum.map(children, &execution_detail/1),
+      timeline: swarm_timeline(swarm, children)
+    }
+  end
+
+  defp swarm_timeline(swarm, children) do
+    coordinator =
+      Enum.map(swarm.events, fn event ->
+        %{
+          at: event.at,
+          offset_ms: event.elapsed_ms,
+          source: "coordinator",
+          execution_id: nil,
+          type: event.type,
+          sequence: event.sequence,
+          data: event.data
+        }
+      end)
+
+    agents =
+      Enum.flat_map(children, fn record ->
+        source = record.trace.agent || record.definition.version
+
+        record.events
+        |> :queue.to_list()
+        |> Enum.map(fn event ->
+          at = record.started_at + event.elapsed_ms
+
+          %{
+            at: at,
+            offset_ms: max(at - swarm.started_at, 0),
+            source: source,
+            execution_id: record.id,
+            type: event.type,
+            sequence: event.sequence,
+            data: event.data
+          }
+        end)
+      end)
+
+    Enum.sort_by(coordinator ++ agents, &{&1.at, &1.source, &1.sequence})
+  end
+
+  defp evict_swarms(%{max_swarms: :infinity} = state), do: state
+
+  defp evict_swarms(state) do
+    if map_size(state.swarms) > state.max_swarms do
+      finished =
+        state.swarms
+        |> Enum.filter(fn {_id, swarm} -> swarm.status in @swarm_terminal end)
+        |> Enum.sort_by(fn {_id, swarm} -> swarm.finished_at || swarm.updated_at end)
+
+      case finished do
+        [{id, _swarm} | _] ->
+          state
+          |> Map.update!(:swarms, &Map.delete(&1, id))
+          |> evict_swarms()
+
+        [] ->
+          state
+      end
+    else
+      state
+    end
+  end
 
   defp validate_config!(config) do
     records = Keyword.fetch!(config, :max_records)

@@ -15,6 +15,11 @@ defmodule KnotraBots.Chat do
   demo's host policy answers read-only approvals itself as soon as it observes
   them, so only write proposals wait for a human. The gate stays in the durable
   trace; the UI never asks a person for a read-only one.
+
+  A `/swarm [fanout|board|debate] <goal>` message runs one non-durable swarm over
+  the channel's agents and posts the outcome as a system note. Swarm members are
+  ordinary executions, so they offer only declared read-only tools: write
+  proposals keep going through the durable, human-approved chat path.
   """
 
   use GenServer
@@ -22,7 +27,7 @@ defmodule KnotraBots.Chat do
   import Ecto.Query
   require Logger
 
-  alias KnotraBots.{Agent, Agents, Channel, Channels, Message, Repo}
+  alias KnotraBots.{Agent, Agents, Channel, Channels, Message, Repo, Swarms}
 
   @tick_ms 250
   @max_hops 1
@@ -30,6 +35,7 @@ defmodule KnotraBots.Chat do
   @execution_timeout 120_000
   @timeline_limit 200
   @recovery_ms 5_000
+  @swarm_prefix "/swarm"
 
   def start_link(_opts), do: GenServer.start_link(__MODULE__, :ok, name: __MODULE__)
 
@@ -43,8 +49,19 @@ defmodule KnotraBots.Chat do
     text = text |> to_string() |> String.trim()
 
     with %Channel{} = channel <- Channels.get(channel_id) || {:error, :not_found},
-         :ok <- valid_text(text),
-         {:ok, agents} <- targets(channel, text) do
+         :ok <- valid_text(text) do
+      if swarm_command?(text) do
+        post_swarm(channel, text)
+      else
+        post_chat(channel, text)
+      end
+    else
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp post_chat(channel, text) do
+    with {:ok, agents} <- targets(channel, text) do
       now = now()
 
       human = %Message{
@@ -150,6 +167,127 @@ defmodule KnotraBots.Chat do
   end
 
   def snapshot(_message), do: nil
+
+  # --- Swarm command ----------------------------------------------------------
+
+  defp swarm_command?(text),
+    do: text == @swarm_prefix or String.starts_with?(text, @swarm_prefix <> " ")
+
+  # The swarm runs in a supervised task: its executions are non-durable and it
+  # must not block the relay's polling loop. The system note is inserted first and
+  # rewritten when the swarm settles, so the UI shows the request immediately.
+  defp post_swarm(channel, text) do
+    with {:ok, mode, goal} <- Swarms.parse_command(text),
+         agents when agents != [] <- Channels.agents(channel.id) do
+      now = now()
+
+      human = %Message{
+        id: new_id("msg"),
+        channel_id: channel.id,
+        author_type: "human",
+        body: text,
+        status: "sent",
+        hop: 0,
+        inserted_at: now,
+        updated_at: now
+      }
+
+      note = %Message{
+        id: new_id("msg"),
+        channel_id: channel.id,
+        author_type: "system",
+        body: "Swarm (#{Swarms.label(mode)}) started with #{length(agents)} agents: #{goal}",
+        status: "running",
+        hop: 0,
+        inserted_at: NaiveDateTime.add(now, 1, :microsecond),
+        updated_at: now
+      }
+
+      case Repo.transaction(fn ->
+             Repo.insert!(human)
+             Repo.insert!(note)
+             human
+           end) do
+        {:ok, human} ->
+          start_swarm(mode, goal, note, agents)
+          broadcast(channel.id)
+          {:ok, human}
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    else
+      [] -> {:error, :no_agents}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp start_swarm(mode, goal, note, agents) do
+    Task.Supervisor.start_child(KnotraBots.TaskSupervisor, fn ->
+      run_swarm(mode, goal, note, agents)
+    end)
+  end
+
+  defp run_swarm(mode, goal, note, agents) do
+    case Swarms.run(agents, mode, goal) do
+      {:ok, result} ->
+        update_note(note, %{status: "completed", body: swarm_body(result)})
+
+      {:error, {:incomplete, result}} ->
+        update_note(note, %{status: "failed", body: swarm_body(result)})
+
+      {:error, reason} ->
+        update_note(note, %{
+          status: "failed",
+          body: "Swarm (#{Swarms.label(mode)}) failed: #{inspect(reason)}"
+        })
+    end
+  catch
+    :exit, reason ->
+      update_note(note, %{
+        status: "failed",
+        body: "Swarm (#{Swarms.label(mode)}) unavailable: #{inspect(reason)}"
+      })
+  end
+
+  defp swarm_body(result) do
+    parts =
+      Enum.map_join(result.tasks, "\n", fn part ->
+        outcome =
+          case part.status do
+            :completed -> "ok"
+            _failed -> "failed: #{Swarms.error_label(part.error)}"
+          end
+
+        "- #{part_label(part.id)} by #{part.agent || "unassigned"}: #{outcome}"
+      end)
+
+    escalations =
+      case result.escalations do
+        [] ->
+          ""
+
+        list ->
+          "\nEscalated: " <>
+            Enum.map_join(list, "; ", fn escalation ->
+              "#{escalation.tool} by #{escalation.agent} (#{inspect(escalation.reason)})"
+            end)
+      end
+
+    "Swarm (#{Swarms.label(result.mode)}) #{result.status} in #{result.elapsed_ms} ms\n" <>
+      (result.output || "(no output)") <> "\n" <> parts <> escalations
+  end
+
+  defp part_label(id) when is_binary(id), do: id
+  defp part_label(index), do: "attempt-#{index + 1}"
+
+  # The relay may be shutting down when a late swarm settles; a lost note update
+  # must not crash the application tree.
+  defp update_note(note, attrs) do
+    put_message(note, attrs)
+  rescue
+    _ -> :ok
+  end
 
   # --- GenServer --------------------------------------------------------------
 

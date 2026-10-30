@@ -32,6 +32,11 @@ defmodule KnotraBotsWeb.Components do
           <span>Manage teammates →</span>
         </a>
 
+        <a class="side-agents" href="/swarm">
+          <span class="side-label">Swarms</span>
+          <span>Run a goal across agents →</span>
+        </a>
+
         <a class="side-agents" href="/observability">
           <span class="side-label">Observability</span>
           <span>Live execution traces →</span>

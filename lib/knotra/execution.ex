@@ -853,6 +853,7 @@ defmodule Knotra.Execution do
   def tool_definitions(definition, durable) do
     tools = Enum.map(definition.tools, & &1.definition())
     names = Enum.map(tools, & &1.name)
+    allow_writes = durable or runtime_supports_writes?(definition.tool_runtime)
 
     if length(names) == length(Enum.uniq(names)) and
          Enum.all?(tools, fn tool ->
@@ -861,13 +862,21 @@ defmodule Knotra.Execution do
              when is_binary(name) and name != "" and is_binary(description) and is_map(parameters) and
                     is_boolean(read_only),
              tool
-           ) and (tool.read_only or durable)
+           ) and (tool.read_only or allow_writes)
          end) do
       {:ok, tools}
     else
       {:error, :invalid_tool_definitions}
     end
   end
+
+  defp runtime_supports_writes?({module, _opts}) do
+    Code.ensure_loaded?(module) and
+      function_exported?(module, :supports_writes?, 0) and
+      module.supports_writes?()
+  end
+
+  defp runtime_supports_writes?(_), do: false
 
   @doc false
   def valid_options?(definition, input, opts) do

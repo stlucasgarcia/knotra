@@ -9,7 +9,7 @@ web
 Two visual surfaces, both server-rendered Phoenix LiveView; the library core, persistence and contracts are headless.
 
 - **Embeddable observability dashboard** — `lib/knotra/dashboard/live.ex`, mounted by hosts at their own protected route. Confirmed role: internal debugging tool for developers/operators.
-- **Demo host application** — `examples/knotra_bots` (chat, `/agents`, `/channels`, `/observability`, own `priv/static/css/app.css`). It is a POC tour of the library's durable approval slice, runnable offline with `KNOTRA_BOTS_MODEL=fake`; its README states its boundaries and it is not a production surface.
+- **Demo host application** — `examples/knotra_bots` (agentic e-commerce chat over a mocked storefront, `/agents`, `/channels`, `/swarm`, `/observability`, own `priv/static/css/app.css`). It is a POC tour of the library's durable approval slice and non-durable swarms, runnable offline with `KNOTRA_BOTS_MODEL=fake`; its README states its boundaries and it is not a production surface.
 
 ## Users
 
@@ -31,7 +31,7 @@ Knotra does not differentiate merely by being embedded, using OTP, offering plug
 
 - Elixir `~> 1.20` Mix library; `ReqLLM ~> 1.24` is the base model dependency.
 - Opt-in durable slice via optional `ecto`/`ecto_sql` and a host-owned Repo; `ecto_sqlite3` only in tests. ADR 0001 authorizes exactly this exception — every other dependency or framework adoption still needs owner authorization.
-- Canonical vocabulary lives in [CONTEXT.md](CONTEXT.md) (Execution, not "Agent", for one work request; input request vs approval request; swarm, shared board, execution inbox, human takeover, presentation request).
+- Canonical vocabulary lives in [GLOSSARY.md](GLOSSARY.md) (Execution, not "Agent", for one work request; input request vs approval request; swarm, shared board, execution inbox, human takeover, presentation request).
 - Verification is offline: `mix test` makes no provider calls and needs no keys; provider behavior is exercised through fixture HTTP responses. Live-model evaluation is explicit, sanitized and separate.
 - Issues tracked in GitHub Issues; triage uses the default five roles.
 - Hosts protect the dashboard themselves; Knotra provides no access control.

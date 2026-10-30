@@ -7,7 +7,7 @@ Knotra is an embedded agent harness for both autonomous background work and user
 
 ## Reading and status
 
-- [CONTEXT.md](CONTEXT.md): canonical domain vocabulary, not implementation details.
+- [GLOSSARY.md](GLOSSARY.md): canonical domain vocabulary, not implementation details.
 - [README.md](README.md): non-durable embedding guide and current limitations.
 - [Durable approvals](docs/durable-approvals.md): implemented opt-in APIs, recovery safe points and SQLite test evidence.
 - [Integrated approval validation](docs/approval-validation.md): executable acceptance mapping, authenticated-responder provenance and bounded proof; no production certification.
@@ -99,6 +99,17 @@ A conversation contains interaction history and may span multiple executions. Ea
 No conversation store or cross-execution history-ordering/merge contract is implemented. A later scoped design must define append ordering, concurrent submissions, duplicate delivery and where resumed outputs join the history. An execution's ordered events do not establish an order across executions; neither observer arrival nor token-stream arrival may be assumed authoritative.
 
 ### Autonomous work, delegation, and swarms — planned
+
+**Implemented subset (non-durable).** `Knotra.Swarm` runs `:fan_out`, `:board`
+and `:debate` groups of ordinary executions under one coordinator and one swarm
+deadline. The coordinator owns admission and child tracking; board members claim
+tasks from a shared ETS board and self-select until it is empty; a
+`Knotra.Swarm.Observer` wrapper relays terminal snapshots and still forwards to
+the definition's own observer; a timed-out or cancelled swarm cancels and
+releases every member. Child work shares the instance's `:max_executions`
+capacity and may dispatch only declared read-only tools. Nothing about a swarm
+survives a host restart, and there are no isolated/durable boards, inboxes, or
+shared budget reservations yet: those remain planned in the paragraphs below.
 
 An unattended agent can act only within host-granted capabilities. Child work shares the root execution's aggregate budget and cancellation scope; delegation cannot expand authority or reset counters. A required human decision creates a wait even when no channel is connected.
 

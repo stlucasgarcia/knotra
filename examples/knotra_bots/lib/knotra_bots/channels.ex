@@ -10,7 +10,7 @@ defmodule KnotraBots.Channels do
   import Ecto.Query
   require Logger
 
-  alias KnotraBots.{Agent, Agents, Channel, ChannelAgent, Message, Repo}
+  alias KnotraBots.{Agent, Channel, ChannelAgent, Message, Repo}
 
   def list, do: Repo.all(from(c in Channel, order_by: [asc: c.inserted_at, asc: c.name]))
   def get(id), do: Repo.get(Channel, id)
@@ -87,41 +87,36 @@ defmodule KnotraBots.Channels do
   end
 
   @doc """
-  Seeds two starter channels when the table is empty.
+  Seeds three starter channels when the table is empty.
 
-  `Ops` pairs the concierge (default) with the researcher so the offline demo
-  shows a handoff; `General` gives the assistant a room of its own.
+  `storefront-ops` carries the guided e-commerce tour and a handoff path;
+  `growth-lab` gives the strategy personas a room for debates and fan-out; and
+  `fulfillment` pairs the order desk with returns for the shared-board backlog.
   """
   def seed! do
-    if Repo.aggregate(Channel, :count) == 0 do
-      with %Agent{} = concierge <- Agents.get("concierge"),
-           %Agent{} = researcher <- Agents.get("researcher") do
-        {:ok, ops} =
-          create(%{
-            "name" => "Ops",
-            "topic" => "Order questions and notices. Try: can you check order ord-1?",
-            "agent_ids" => [concierge.id, researcher.id],
-            "default_agent_id" => concierge.id
-          })
+    seed_channel(
+      "storefront-ops",
+      "Agentic storefront: orders, returns and inventory. Try a guided prompt.",
+      ["concierge", "orders", "inventory", "returns"],
+      "concierge",
+      storefront_tour()
+    )
 
-        system(
-          ops,
-          "Mention @researcher or @concierge to assign work. Without a mention, @concierge answers."
-        )
-      end
+    seed_channel(
+      "growth-lab",
+      "Three specialists, one goal. Debate a retention offer or fan out a launch audit.",
+      ["pricing", "retention", "brand"],
+      "pricing",
+      growth_tour()
+    )
 
-      with %Agent{} = assistant <- Agents.get("assistant") do
-        {:ok, general} =
-          create(%{
-            "name" => "General",
-            "topic" => "Ask anything.",
-            "agent_ids" => [assistant.id],
-            "default_agent_id" => assistant.id
-          })
-
-        system(general, "Mention @assistant to assign work.")
-      end
-    end
+    seed_channel(
+      "fulfillment",
+      "Backlog triage. Run /swarm board ... or load the Order backlog scenario.",
+      ["orders", "returns"],
+      "orders",
+      fulfillment_tour()
+    )
 
     :ok
   rescue
@@ -129,6 +124,63 @@ defmodule KnotraBots.Channels do
     error ->
       Logger.warning("channel seed skipped: #{Exception.message(error)}")
       :ok
+  end
+
+  defp seed_channel(name, topic, agent_ids, default_id, note) do
+    if Repo.get_by(Channel, name: name) do
+      :ok
+    else
+      agents = Repo.all(from(a in Agent, where: a.id in ^agent_ids, order_by: [asc: a.name]))
+
+      if length(agents) == length(agent_ids) do
+        attrs = %{
+          "name" => name,
+          "topic" => topic,
+          "agent_ids" => Enum.map(agents, & &1.id),
+          "default_agent_id" => default_id
+        }
+
+        case create(attrs) do
+          {:ok, channel} ->
+            system(channel, note)
+            :ok
+
+          {:error, reason} ->
+            Logger.warning("channel seed skipped for #{name}: #{inspect(reason)}")
+            :ok
+        end
+      else
+        Logger.warning("channel seed skipped for #{name}: agents not ready")
+        :ok
+      end
+    end
+  end
+
+  defp storefront_tour do
+    """
+    Guided tour — send one of these:
+    • can you check order ord-3?              → @concierge routes to @orders
+    • is ord-3 eligible for a return?         → @returns checks the 30-day policy
+    • refund ord-3 because it arrived late    → @returns proposes; approve to write
+    • restock sku-tee-01                      → @inventory proposes; approve to write
+    • notify ops that ord-4 is delayed        → approval-gated notice
+    Swarms: open /swarm and load a scenario (growth-lab debate, fulfillment backlog).
+    """
+  end
+
+  defp growth_tour do
+    """
+    Growth lab — three specialists, one goal.
+    Try /swarm debate A gold customer's order is late: choose 15% credit, free expedited shipping, or a personal apology.
+    Or open /swarm and load a scenario to compare debate, fan-out and shared-board work.
+    """
+  end
+
+  defp fulfillment_tour do
+    """
+    Shared-board demo: agents claim order checks until the board is empty.
+    Try /swarm board check order ord-3, check order ord-4, check order ord-5, check order ord-7
+    """
   end
 
   defp system(channel, body) do

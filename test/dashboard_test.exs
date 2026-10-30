@@ -24,6 +24,7 @@ if Code.ensure_loaded?(Knotra.Dashboard.Live) do
 
     alias Knotra.{Dashboard, Definition}
     alias Knotra.Dashboard.Live
+    alias Knotra.Swarm.{Agent, Spec}
 
     test "the router macro compiles with helpers, names the helper, and forwards on_mount" do
       assert [route] =
@@ -150,6 +151,70 @@ if Code.ensure_loaded?(Knotra.Dashboard.Live) do
       messages = render(socket)
       assert messages =~ "echo: hello dashboard"
       assert messages =~ "hello dashboard"
+    end
+
+    test "renders swarms and the coordinator timeline", context do
+      plan = fn _goal, _agents ->
+        {:ok,
+         %{
+           agents: [
+             %Agent{
+               name: "worker",
+               prompt: "worker prompt",
+               definition: %Definition{
+                 version: "swarm-worker",
+                 model: {Model, model: "fake"},
+                 tools: []
+               }
+             }
+           ],
+           tasks: [%{id: "t1", input: "swarm input", agent: "worker", depth: 0}],
+           trace: %{
+             model: "test-coordinator",
+             input: "coordinator input",
+             output: "coordinator said hello"
+           }
+         }}
+      end
+
+      spec = %Spec{
+        mode: :coordinator,
+        goal: "swarm goal",
+        agents: [
+          %Agent{
+            name: "pre",
+            definition: %Definition{version: "swarm-pre", model: {Model, model: "fake"}}
+          }
+        ],
+        plan: plan,
+        timeout: 5_000
+      }
+
+      assert {:ok, result} = Knotra.Swarm.run(context.instance, spec, await_timeout: 5_000)
+      Knotra.Observability.sync(context.instance)
+      assert {:ok, swarms} = Knotra.Observability.swarms(context.instance)
+      swarm = Enum.find(swarms, &(&1.id == result.swarm_id))
+      assert swarm.status == :completed
+
+      {:ok, socket} = mount(context.instance)
+      {:noreply, socket} = Live.handle_event("tab", %{"tab" => "swarms"}, socket)
+
+      html = render(socket)
+      assert html =~ "Swarms"
+      assert html =~ "swarm goal"
+      assert html =~ "worker"
+
+      {:noreply, socket} =
+        Live.handle_event("select_swarm", %{"id" => swarm.id}, socket)
+
+      detail = render(socket)
+      assert detail =~ "Coordinator output"
+      assert detail =~ "coordinator said hello"
+      assert detail =~ "Initial prompt"
+      assert detail =~ "worker prompt"
+      assert detail =~ "Timeline"
+      assert detail =~ "echo: swarm input"
+      assert detail =~ "task t1"
     end
 
     test "opens the execution detail with the model and tool timeline", context do

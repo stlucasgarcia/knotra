@@ -764,6 +764,314 @@ code {
   box-shadow: var(--shadow);
 }
 
+.swarm-result {
+  margin-top: 16px;
+}
+
+.swarm-result h2 {
+  margin: 0 0 10px;
+  font-size: 0.95rem;
+  font-weight: 600;
+}
+
+.swarm-meta {
+  margin: -4px 0 10px;
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.swarm-meta code {
+  font-size: 0.72rem;
+}
+
+.swarm-output {
+  margin: 0 0 12px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.8rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.swarm-tasks {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.8rem;
+}
+
+.swarm-tasks th,
+.swarm-tasks td {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+}
+
+.swarm-tasks th {
+  color: var(--muted);
+  font-weight: 500;
+}
+
+.mode-options {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.mode-options legend {
+  margin-bottom: 4px;
+  padding: 0;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.mode-option {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+  cursor: pointer;
+}
+
+.mode-option input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+}
+
+.mode-option:focus-within {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.mode-option-selected {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.mode-title {
+  color: var(--ink);
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+
+.mode-desc {
+  color: var(--muted);
+  font-size: 0.75rem;
+  line-height: 1.35;
+}
+
+.mode-use {
+  color: var(--accent);
+  font-size: 0.72rem;
+  line-height: 1.35;
+}
+
+.scenarios {
+  margin-bottom: 16px;
+}
+
+.scenarios h2 {
+  margin: 0 0 8px;
+  color: var(--muted);
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.scenario-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
+}
+
+.scenario-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+}
+
+.scenario-card p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.4;
+}
+
+.scenario-card .scenario-goal {
+  color: var(--ink);
+  font-size: 0.75rem;
+  font-style: italic;
+}
+
+.scenario-card button {
+  align-self: flex-start;
+  margin-top: 2px;
+}
+
+.swarm-selected {
+  margin: 0 0 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  background: var(--accent-soft);
+  color: var(--ink);
+  font-size: 0.8rem;
+}
+
+.coordinator-plan {
+  margin: 0 0 12px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--bg);
+}
+
+.coordinator-plan h3 {
+  margin: 0 0 2px;
+  color: var(--ink);
+  font-size: 0.86rem;
+  font-weight: 600;
+}
+
+.coordinator-meta {
+  margin: 0 0 10px;
+  color: var(--muted);
+  font-size: 0.74rem;
+}
+
+.agent-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
+}
+
+.agent-card {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface);
+}
+
+.agent-card-created {
+  border-color: var(--accent);
+}
+
+.agent-card .muted {
+  font-size: 0.76rem;
+}
+
+.agent-prompt-preview {
+  margin: 0;
+  color: var(--ink);
+  font-size: 0.76rem;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.agent-prompt {
+  font-size: 0.76rem;
+}
+
+.agent-prompt summary {
+  cursor: pointer;
+  color: var(--accent);
+}
+
+.agent-prompt pre {
+  margin: 6px 0 0;
+  padding: 8px;
+  max-height: 180px;
+  overflow: auto;
+  border-radius: 7px;
+  background: var(--bg);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.72rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.agent-version {
+  align-self: flex-start;
+  color: var(--muted);
+  font-size: 0.68rem;
+}
+
+.swarm-escalations {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--warn-line);
+  border-radius: 10px;
+  background: var(--warn-bg);
+}
+
+.swarm-escalations h3 {
+  margin: 0 0 6px;
+  color: var(--warn);
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+
+.swarm-escalations ul {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.swarm-escalations li {
+  margin: 4px 0;
+  color: var(--ink);
+  font-size: 0.78rem;
+  overflow-wrap: anywhere;
+}
+
+.swarm-parts {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.swarm-part {
+  border-top: 1px dashed var(--line);
+  padding-top: 6px;
+}
+
+.swarm-part summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.swarm-part pre {
+  margin: 6px 0 0;
+  padding: 8px;
+  border-radius: 8px;
+  background: var(--bg);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.75rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .form {
   display: flex;
   flex-direction: column;
@@ -883,6 +1191,7 @@ code {
 
 .system-note {
   max-width: 860px;
+  white-space: pre-line;
   margin: 6px auto;
   color: var(--muted);
   font-size: 0.74rem;
@@ -967,5 +1276,13 @@ code {
 
   .page {
     padding: 16px;
+  }
+
+  .mode-options {
+    grid-template-columns: 1fr;
+  }
+
+  .scenario-grid {
+    grid-template-columns: 1fr;
   }
 }

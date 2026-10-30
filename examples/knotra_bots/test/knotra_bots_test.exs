@@ -13,7 +13,7 @@ defmodule KnotraBotsTest do
   import Phoenix.LiveViewTest
   import Plug.Conn, only: [put_req_header: 3]
 
-  alias KnotraBots.{Agents, Channels, Chat}
+  alias KnotraBots.{Agents, Channels, Chat, Swarms}
 
   @endpoint KnotraBotsWeb.Endpoint
 
@@ -24,20 +24,35 @@ defmodule KnotraBotsTest do
         __DIR__
       )
 
+    effects =
+      Path.expand(
+        "../_build/effects-#{System.unique_integer([:positive, :monotonic])}.log",
+        __DIR__
+      )
+
     File.rm(notices)
+    File.rm(effects)
     Application.put_env(:knotra_bots, :notices_path, notices)
+    Application.put_env(:knotra_bots, :effects_path, effects)
 
     on_exit(fn ->
       File.rm(notices)
+      File.rm(effects)
 
       Application.put_env(
         :knotra_bots,
         :notices_path,
         Path.expand("../_build/notices.log", __DIR__)
       )
+
+      Application.put_env(
+        :knotra_bots,
+        :effects_path,
+        Path.expand("../_build/effects.log", __DIR__)
+      )
     end)
 
-    %{notices: notices}
+    %{notices: notices, effects: effects}
   end
 
   test "a channel message gets an offline agent reply", %{notices: _notices} do
@@ -79,6 +94,169 @@ defmodule KnotraBotsTest do
       await_agent_message(channel.id, &(&1.agent_id == alpha.id and &1.status == "completed"))
 
     assert alpha_reply.body =~ "Alpha received: hello default"
+  end
+
+  test "a /swarm debate runs over the channel agents and posts the outcome",
+       %{notices: _notices} do
+    alpha = agent_fixture(%{"name" => "Swarm Alpha", "handle" => unique_handle("swarm-alpha")})
+    beta = agent_fixture(%{"name" => "Swarm Beta", "handle" => unique_handle("swarm-beta")})
+    channel = channel_fixture([alpha, beta], default: alpha.id)
+
+    {:ok, view, _html} = live(build_conn(), "/channels/#{channel.id}")
+
+    submit_message(view, "/swarm debate compare the two plans")
+
+    note = await_note(channel.id, &(&1.status in ["completed", "failed"]))
+    assert note.status == "completed"
+    assert note.body =~ "Swarm (debate) completed"
+    assert note.body =~ "received: compare the two plans"
+    assert note.body =~ "by Swarm Alpha: ok"
+    assert note.body =~ "by Swarm Beta: ok"
+
+    html = await_html(view, &String.contains?(&1, "Swarm (debate) completed"))
+    assert html =~ "Swarm Alpha"
+  end
+
+  test "a /swarm fanout splits the goal into one task per part", %{notices: _notices} do
+    alpha = agent_fixture(%{"name" => "Fan Alpha", "handle" => unique_handle("fan-alpha")})
+    beta = agent_fixture(%{"name" => "Fan Beta", "handle" => unique_handle("fan-beta")})
+    channel = channel_fixture([alpha, beta], default: alpha.id)
+
+    assert {:ok, human} = Chat.post(channel.id, "/swarm fanout plan the launch, list the risks")
+    assert human.body =~ "/swarm fanout"
+
+    note = await_note(channel.id, &(&1.status in ["completed", "failed"]))
+    assert note.status == "completed"
+    assert note.body =~ "Swarm (fanout) completed"
+    assert note.body =~ "task-1:"
+    assert note.body =~ "task-2:"
+    assert note.body =~ "received: plan the launch"
+    assert note.body =~ "received: list the risks"
+    assert note.body =~ "by Fan Alpha: ok"
+    assert note.body =~ "by Fan Beta: ok"
+  end
+
+  test "a /swarm board message posts a completed note without agent replies",
+       %{notices: _notices} do
+    alpha = agent_fixture(%{"name" => "Board Alpha", "handle" => unique_handle("board-alpha")})
+    channel = channel_fixture([alpha], default: alpha.id)
+
+    assert {:ok, _human} = Chat.post(channel.id, "/swarm board draft the summary")
+
+    note = await_note(channel.id, &(&1.status in ["completed", "failed"]))
+    assert note.status == "completed"
+    assert note.body =~ "Swarm (board) completed"
+    assert note.body =~ "by Board Alpha: ok"
+    assert agent_messages(channel.id) == []
+  end
+
+  test "a /swarm message without a goal is rejected before any note is stored",
+       %{notices: _notices} do
+    agent = agent_fixture(%{"name" => "Empty Goal", "handle" => unique_handle("empty-goal")})
+    channel = channel_fixture([agent], default: agent.id)
+
+    assert {:error, :empty_swarm_goal} = Chat.post(channel.id, "/swarm debate")
+    assert Chat.messages(channel.id) == []
+  end
+
+  test "/swarm page runs a debate over the selected channel's agents",
+       %{notices: _notices} do
+    alpha = agent_fixture(%{"name" => "Page Alpha", "handle" => unique_handle("page-alpha")})
+    beta = agent_fixture(%{"name" => "Page Beta", "handle" => unique_handle("page-beta")})
+    channel = channel_fixture([alpha, beta], default: alpha.id)
+
+    {:ok, view, html} = live(build_conn(), "/swarm")
+
+    assert html =~ "Swarms"
+    assert html =~ ~s(href="/swarm")
+
+    # Every mode is explained before the first run.
+    assert html =~ "Every agent answers the same goal independently"
+    assert html =~ "The goal splits into comma-separated parts"
+    assert html =~ "Members claim parts from a shared board"
+
+    view
+    |> element("#swarm-form")
+    |> render_change(%{
+      "channel_id" => channel.id,
+      "mode" => "debate",
+      "goal" => "compare the two plans"
+    })
+
+    view |> element("#swarm-form") |> render_submit()
+
+    html =
+      await_html(view, &String.contains?(&1, ~s(data-testid="swarm-result")), 10_000)
+
+    assert html =~ "Swarm completed"
+    assert html =~ "Page Alpha"
+    assert html =~ "Page Beta"
+    assert html =~ "received: compare the two plans"
+    assert html =~ "Conversation"
+    assert html =~ "swarm-"
+    assert html =~ "Turns"
+  end
+
+  test "/swarm page fan-out lists one row per comma-separated part", %{notices: _notices} do
+    alpha = agent_fixture(%{"name" => "Fanned Alpha", "handle" => unique_handle("fanned-alpha")})
+    beta = agent_fixture(%{"name" => "Fanned Beta", "handle" => unique_handle("fanned-beta")})
+    channel = channel_fixture([alpha, beta], default: alpha.id)
+
+    {:ok, view, _html} = live(build_conn(), "/swarm")
+
+    view
+    |> element("#swarm-form")
+    |> render_change(%{
+      "channel_id" => channel.id,
+      "mode" => "fanout",
+      "goal" => "plan the launch, list the risks"
+    })
+
+    view |> element("#swarm-form") |> render_submit()
+
+    html =
+      await_html(view, &String.contains?(&1, ~s(data-testid="swarm-result")), 10_000)
+
+    assert html =~ "Swarm completed"
+    assert html =~ "task-1"
+    assert html =~ "task-2"
+    assert html =~ "received: plan the launch"
+    assert html =~ "received: list the risks"
+  end
+
+  test "/swarm page requires a goal", %{notices: _notices} do
+    agent = agent_fixture(%{"name" => "No Goal", "handle" => unique_handle("no-goal")})
+    _channel = channel_fixture([agent])
+
+    {:ok, view, _html} = live(build_conn(), "/swarm")
+
+    view |> element("#swarm-form") |> render_submit()
+
+    assert render(view) =~ "Write a goal for the swarm."
+  end
+
+  test "/swarm members authorize read-only tools with the host scope",
+       %{notices: _notices} do
+    orders = Agents.get!("orders")
+    channel = channel_fixture([orders])
+
+    {:ok, view, _html} = live(build_conn(), "/swarm")
+
+    view
+    |> element("#swarm-form")
+    |> render_change(%{
+      "channel_id" => channel.id,
+      "mode" => "fanout",
+      "goal" => "look up order ord-3"
+    })
+
+    view |> element("#swarm-form") |> render_submit()
+
+    html = await_html(view, &String.contains?(&1, ~s(data-testid="swarm-result")), 10_000)
+
+    assert html =~ "Swarm completed"
+    assert html =~ "Order ord-3 delivered 12 days ago"
+    refute html =~ "plugin_exception"
   end
 
   test "typing @ lists channel agents and picking one inserts the handle",
@@ -167,7 +345,7 @@ defmodule KnotraBotsTest do
     Knotra.Observability.sync(KnotraBots.Instance)
     assert {:ok, executions} = Knotra.Observability.executions(KnotraBots.Instance)
     assert Enum.any?(executions, &(&1.id == message.execution_id))
-    refute Enum.any?(executions, &is_integer(&1.id))
+    assert is_binary(message.execution_id)
 
     {:ok, dashboard, html} = live(build_conn(), "/observability")
 
@@ -201,11 +379,11 @@ defmodule KnotraBotsTest do
     assert detail =~ "Run total"
   end
 
-  test "a concierge handoff becomes a researcher lookup that runs without a human gate",
+  test "a concierge handoff becomes an order lookup that runs without a human gate",
        %{notices: _notices} do
     concierge = Agents.get!("concierge")
-    researcher = Agents.get!("researcher")
-    channel = channel_fixture([concierge, researcher], default: concierge.id)
+    orders = Agents.get!("orders")
+    channel = channel_fixture([concierge, orders], default: concierge.id)
 
     {:ok, view, _html} = live(build_conn(), "/channels/#{channel.id}")
 
@@ -217,15 +395,15 @@ defmodule KnotraBotsTest do
         &(&1.agent_id == concierge.id and &1.status == "completed")
       )
 
-    assert first.body =~ "@researcher"
+    assert first.body =~ "@orders"
 
-    research = await_agent_message(channel.id, &(&1.agent_id == researcher.id))
+    research = await_agent_message(channel.id, &(&1.agent_id == orders.id))
     assert research.hop == 1
 
     done =
       await_agent_message(
         channel.id,
-        &(&1.agent_id == researcher.id and &1.status == "completed")
+        &(&1.agent_id == orders.id and &1.status == "completed")
       )
 
     assert done.body =~ "Order ord-1 shipped"
@@ -242,11 +420,11 @@ defmodule KnotraBotsTest do
     assert {:ok, graph} = Knotra.Observability.graph(KnotraBots.Instance)
 
     assert Enum.any?(graph.agent_edges, fn edge ->
-             edge.from == "Concierge" and edge.to == "Researcher"
+             edge.from == "Concierge" and edge.to == "Order Desk"
            end)
 
     assert Enum.any?(graph.conversations, fn conversation ->
-             Enum.map(conversation.executions, & &1.agent) == ["Concierge", "Researcher"]
+             Enum.map(conversation.executions, & &1.agent) == ["Concierge", "Order Desk"]
            end)
   end
 
@@ -270,6 +448,37 @@ defmodule KnotraBotsTest do
     assert notice_lines(notices) == ["ops"]
   end
 
+  test "the observability dashboard shows the coordinator plan and merged timeline",
+       %{notices: _notices, effects: _effects} do
+    assert {:error, {:incomplete, result}} =
+             Swarms.run(Agents.list(), :coordinator, "Plan the refund and restock backlog")
+
+    Knotra.Observability.sync(KnotraBots.Instance)
+
+    {:ok, dashboard, _html} = live(build_conn(), "/observability")
+
+    dashboard
+    |> element(~s(button.k-tab[phx-value-tab="swarms"]))
+    |> render_click()
+
+    tab = render(dashboard)
+    assert tab =~ "Swarms"
+    assert tab =~ "Refund Specialist"
+
+    dashboard
+    |> element(~s([phx-value-id="#{result.swarm_id}"]))
+    |> render_click()
+
+    detail = render(dashboard)
+    assert detail =~ "Coordinator output"
+    assert detail =~ "Initial prompt"
+    assert detail =~ "Escalations"
+    assert detail =~ "refund_over_limit"
+    assert detail =~ "Timeline"
+    assert detail =~ "Refund Specialist"
+    assert detail =~ "Stock Specialist"
+  end
+
   test "rejecting notify records rejection and writes no notice", %{notices: notices} do
     concierge = Agents.get!("concierge")
     channel = channel_fixture([concierge], default: concierge.id)
@@ -289,9 +498,282 @@ defmodule KnotraBotsTest do
     assert notice_lines(notices) == []
   end
 
+  test "coordinator normalization ignores model-provided depth noise" do
+    plan = %{
+      "agents" => [],
+      "tasks" => [
+        %{"id" => "a", "input" => "one", "agent" => "Concierge", "depth" => 99},
+        %{"id" => "b", "input" => "two", "agent" => "Concierge", "depth" => nil},
+        %{"id" => "c", "input" => "three", "agent" => "Concierge", "depth" => "2"},
+        %{"id" => "d", "input" => "four", "agent" => "Concierge"}
+      ]
+    }
+
+    assert {:ok, %{agents: [], tasks: tasks}} =
+             Swarms.normalize_coordinator_plan(plan, Agents.list())
+
+    assert Enum.map(tasks, & &1.id) == ["a", "b", "c", "d"]
+    assert Enum.map(tasks, & &1.depth) == [0, 0, 0, 0]
+    assert {:error, :invalid_plan} = Swarms.normalize_coordinator_plan(%{}, Agents.list())
+
+    assert {:error, :non_demo_plan} =
+             Swarms.validate_demo_plan(%{agents: [], tasks: []})
+
+    assert {:ok, plan} =
+             Swarms.normalize_coordinator_plan(
+               KnotraBots.Models.CoordinatorFake.plan(),
+               Agents.list()
+             )
+
+    assert :ok = Swarms.validate_demo_plan(plan)
+  end
+
+  test "/swarm coordinator result shows created agents, tools, and prompts",
+       %{notices: _notices, effects: _effects} do
+    {:ok, view, _html} = live(build_conn(), "/swarm")
+
+    view
+    |> element(~s([data-testid="scenario-coordinator-plan"] button))
+    |> render_click()
+
+    view |> element("#swarm-form") |> render_submit()
+
+    html = await_html(view, &String.contains?(&1, ~s(data-testid="coordinator-plan")), 10_000)
+
+    assert html =~ "Refund Specialist"
+    assert html =~ "Stock Specialist"
+    assert html =~ "You review refunds"
+    assert html =~ "Full prompt"
+    assert html =~ "order_lookup"
+    assert html =~ "swarm-refund-specialist-v1"
+    assert html =~ "Escalated writes"
+    assert html =~ "refund-in-policy"
+    assert html =~ "Iteration"
+  end
+
+  test "a coordinator creates specialists and applies the write policy",
+       %{notices: notices, effects: effects} do
+    assert {:error, {:incomplete, result}} =
+             Swarms.run(Agents.list(), :coordinator, "Plan the refund and restock backlog")
+
+    assert "Refund Specialist" in result.agents
+    assert "Stock Specialist" in result.agents
+
+    refund = Enum.find(result.agent_details, &(&1.name == "Refund Specialist"))
+    assert refund.created
+    assert refund.prompt =~ "refund"
+    assert "refund" in refund.tools
+    assert refund.version == "swarm-refund-specialist-v1"
+
+    stock = Enum.find(result.agent_details, &(&1.name == "Stock Specialist"))
+    assert stock.created
+    assert stock.prompt =~ "stock"
+    assert "restock" in stock.tools
+
+    concierge = Enum.find(result.agent_details, &(&1.name == "Concierge"))
+    refute concierge.created
+
+    assert length(result.escalations) == 1
+
+    escalation = hd(result.escalations)
+    assert escalation.agent == "Refund Specialist"
+    assert escalation.tool == "refund"
+    assert escalation.arguments == %{"order" => "ord-3", "reason" => "it arrived late"}
+    assert escalation.reason == :refund_over_limit
+
+    assert Enum.find(result.tasks, &(&1.id == "refund-in-policy")).status == :completed
+    assert Enum.find(result.tasks, &(&1.id == "restock")).status == :completed
+    assert Enum.find(result.tasks, &(&1.id == "notify")).status == :completed
+
+    assert Enum.sort(effect_lines(effects)) == [
+             "refund ord-5 $40.00 · it arrived late",
+             "restock sku-tee-01 +24"
+           ]
+
+    assert notice_lines(notices) == ["ops"]
+
+    Knotra.Observability.sync(KnotraBots.Instance)
+    assert {:ok, swarms} = Knotra.Observability.swarms(KnotraBots.Instance)
+    summary = Enum.find(swarms, &(&1.id == result.swarm_id))
+    assert summary.mode == :coordinator
+    assert summary.created_agents == ["Refund Specialist", "Stock Specialist"]
+    assert summary.escalations == 1
+
+    assert {:ok, detail} = Knotra.Observability.swarm(KnotraBots.Instance, result.swarm_id)
+    assert detail.swarm.planner.output =~ "Refund Specialist"
+    assert Enum.any?(detail.timeline, &(&1.source == "coordinator" and &1.type == :planned))
+    assert Enum.any?(detail.timeline, &(&1.source == "Refund Specialist"))
+    assert Enum.any?(detail.timeline, &(&1.type == :escalation))
+    assert Enum.any?(detail.timeline, &(&1.type == :finished))
+  end
+
+  test "the default chat opens the seeded e-commerce storefront with a guided tour",
+       %{notices: _notices} do
+    {:ok, _view, html} = live(build_conn(), "/")
+
+    assert html =~ "storefront-ops"
+    assert html =~ "Guided tour"
+    assert html =~ "can you check order ord-3?"
+    assert html =~ "@returns proposes; approve to write"
+    assert html =~ "@inventory"
+    assert html =~ "Swarms"
+  end
+
+  test "the order desk reads mocked orders and returns checks the policy",
+       %{notices: _notices} do
+    orders = Agents.get!("orders")
+    returns = Agents.get!("returns")
+    channel = channel_fixture([orders, returns], default: orders.id)
+
+    {:ok, view, _html} = live(build_conn(), "/channels/#{channel.id}")
+
+    submit_message(view, "check order ord-3")
+
+    order_reply =
+      await_agent_message(
+        channel.id,
+        &(&1.agent_id == orders.id and &1.status == "completed")
+      )
+
+    assert order_reply.body =~ "Order ord-3 delivered 12 days ago"
+    assert order_reply.body =~ "Maya Chen"
+    assert order_reply.body =~ "$68.00"
+
+    submit_message(view, "@#{returns.handle} is ord-3 eligible for a return?")
+
+    return_reply =
+      await_agent_message(
+        channel.id,
+        &(&1.agent_id == returns.id and &1.status == "completed")
+      )
+
+    assert return_reply.body =~ "return-eligible"
+    assert return_reply.body =~ "18 days left"
+    refute return_reply.body =~ "plugin_exception"
+  end
+
+  test "the concierge routes a customer profile question to the order desk",
+       %{notices: _notices} do
+    concierge = Agents.get!("concierge")
+    orders = Agents.get!("orders")
+    channel = channel_fixture([concierge, orders], default: concierge.id)
+
+    {:ok, view, _html} = live(build_conn(), "/channels/#{channel.id}")
+
+    submit_message(view, "who is maya chen?")
+
+    first =
+      await_agent_message(
+        channel.id,
+        &(&1.agent_id == concierge.id and &1.status == "completed")
+      )
+
+    assert first.body =~ "@orders"
+
+    profile =
+      await_agent_message(
+        channel.id,
+        &(&1.agent_id == orders.id and &1.status == "completed")
+      )
+
+    assert profile.body =~ "Maya Chen"
+    assert profile.body =~ "LTV $1,840.00"
+    assert profile.body =~ "VIP"
+  end
+
+  test "inventory lists the low and out-of-stock SKUs", %{notices: _notices} do
+    inventory = Agents.get!("inventory")
+    channel = channel_fixture([inventory], default: inventory.id)
+
+    {:ok, view, _html} = live(build_conn(), "/channels/#{channel.id}")
+
+    submit_message(view, "what is low on stock?")
+
+    reply =
+      await_agent_message(
+        channel.id,
+        &(&1.agent_id == inventory.id and &1.status == "completed")
+      )
+
+    assert reply.body =~ "sku-tee-01"
+    assert reply.body =~ "LOW"
+    assert reply.body =~ "sku-mug-03"
+    assert reply.body =~ "OUT OF STOCK"
+  end
+
+  test "approving a refund writes one effects-ledger line", %{notices: _notices, effects: effects} do
+    returns = Agents.get!("returns")
+    channel = channel_fixture([returns], default: returns.id)
+
+    {:ok, view, _html} = live(build_conn(), "/channels/#{channel.id}")
+
+    submit_message(view, "refund ord-3 because it arrived late")
+    message = await_agent_message(channel.id, &(&1.status == "waiting"))
+    await_html(view, &String.contains?(&1, ~s(data-testid="approval")))
+
+    view
+    |> element(~s(button[phx-value-id="#{message.id}"][phx-value-decision="approve"]))
+    |> render_click()
+
+    done = await_agent_message(channel.id, &(&1.status == "completed"))
+    assert done.body =~ "Refund of $68.00 for ord-3 queued"
+    assert effect_lines(effects) == ["refund ord-3 $68.00 · it arrived late"]
+  end
+
+  test "approving a restock writes one effects-ledger line", %{
+    notices: _notices,
+    effects: effects
+  } do
+    inventory = Agents.get!("inventory")
+    channel = channel_fixture([inventory], default: inventory.id)
+
+    {:ok, view, _html} = live(build_conn(), "/channels/#{channel.id}")
+
+    submit_message(view, "restock sku-tee-01")
+    message = await_agent_message(channel.id, &(&1.status == "waiting"))
+    await_html(view, &String.contains?(&1, ~s(data-testid="approval")))
+
+    view
+    |> element(~s(button[phx-value-id="#{message.id}"][phx-value-decision="approve"]))
+    |> render_click()
+
+    done = await_agent_message(channel.id, &(&1.status == "completed"))
+    assert done.body =~ "Restock request: sku-tee-01 Everyday Tee +24"
+    assert effect_lines(effects) == ["restock sku-tee-01 +24"]
+  end
+
+  test "a refund of an ineligible order is rejected before any approval",
+       %{notices: _notices, effects: effects} do
+    returns = Agents.get!("returns")
+    channel = channel_fixture([returns], default: returns.id)
+
+    {:ok, view, _html} = live(build_conn(), "/channels/#{channel.id}")
+
+    submit_message(view, "refund ord-7 because it is old")
+
+    failed = await_agent_message(channel.id, &(&1.status in ["failed", "blocked"]))
+    assert failed.status in ["failed", "blocked"]
+    assert effect_lines(effects) == []
+  end
+
+  test "/swarm page loads an e-commerce scenario into the form", %{notices: _notices} do
+    {:ok, view, _html} = live(build_conn(), "/swarm")
+
+    assert render(view) =~ "Late-delivery recovery"
+    assert render(view) =~ "Order backlog"
+
+    view
+    |> element(~s([data-testid="scenario-retention-debate"] button))
+    |> render_click()
+
+    form = view |> element("#swarm-form textarea") |> render()
+    assert form =~ "A gold customer"
+    assert form =~ "Defend one."
+  end
+
   test "a clarification is answered inside the agent message", %{notices: _notices} do
-    assistant = Agents.get!("assistant")
-    channel = channel_fixture([assistant], default: assistant.id)
+    concierge = Agents.get!("concierge")
+    channel = channel_fixture([concierge], default: concierge.id)
 
     {:ok, view, _html} = live(build_conn(), "/channels/#{channel.id}")
 
@@ -429,14 +911,14 @@ defmodule KnotraBotsTest do
         "handle" => handle,
         "model" => "fake",
         "system_prompt" => "You are terse.",
-        "tools" => ["lookup"]
+        "tools" => ["order_lookup"]
       })
     )
 
     assert render(view) =~ name
     agent = Agents.list() |> Enum.find(&(&1.name == name))
     assert agent.handle == handle
-    assert Agents.tool_modules(agent) == [KnotraBots.Tools.Lookup]
+    assert Agents.tool_modules(agent) == [KnotraBots.Tools.OrderLookup]
 
     auto_name = "Auto Handle #{System.unique_integer([:positive])}"
 
@@ -459,7 +941,7 @@ defmodule KnotraBotsTest do
         "handle" => agent.handle,
         "model" => "fake",
         "system_prompt" => "You are terse.",
-        "tools" => ["lookup"]
+        "tools" => ["order_lookup"]
       })
     )
 
@@ -526,6 +1008,18 @@ defmodule KnotraBotsTest do
     assert failed.body =~ "Model not ready"
   end
 
+  test "Gemini 2.5 options reserve the output budget for text" do
+    opts = KnotraBots.model_options("google:gemini-2.5-flash", "be brief")
+
+    assert opts[:max_tokens] == 2048
+    assert opts[:google_thinking_budget] == 0
+
+    refute Keyword.has_key?(
+             KnotraBots.model_options("openai:gpt-4o-mini", ""),
+             :google_thinking_budget
+           )
+  end
+
   defp agent_fixture(attrs) do
     n = System.unique_integer([:positive])
 
@@ -564,6 +1058,30 @@ defmodule KnotraBotsTest do
   defp agent_messages(channel_id) do
     Chat.messages(channel_id)
     |> Enum.filter(&(&1.author_type == "agent"))
+  end
+
+  defp await_note(channel_id, fun, timeout \\ 10_000) do
+    deadline = System.monotonic_time(:millisecond) + timeout
+    do_await_note(channel_id, fun, deadline)
+  end
+
+  defp do_await_note(channel_id, fun, deadline) do
+    match =
+      Enum.find(Chat.messages(channel_id), fn message ->
+        message.author_type == "system" and fun.(message)
+      end)
+
+    cond do
+      match ->
+        match
+
+      System.monotonic_time(:millisecond) >= deadline ->
+        flunk("timed out waiting for a swarm note in #{channel_id}")
+
+      true ->
+        Process.sleep(25)
+        do_await_note(channel_id, fun, deadline)
+    end
   end
 
   defp await_agent_message(channel_id, fun, timeout \\ 5_000) do
@@ -605,6 +1123,10 @@ defmodule KnotraBotsTest do
         Process.sleep(25)
         do_await_html(view, fun, deadline)
     end
+  end
+
+  defp effect_lines(path) do
+    if File.exists?(path), do: File.read!(path) |> String.split("\n", trim: true), else: []
   end
 
   defp notice_lines(path) do

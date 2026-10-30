@@ -27,6 +27,15 @@ defmodule KnotraBotsWeb.Endpoint do
     from: {:phoenix_live_view, "priv/static"},
     only: ~w(phoenix_live_view.min.js)
 
+  # Development only: recompile changed modules per request and let the browser
+  # reload when watched files change. `phoenix_live_reload` is a dev dependency,
+  # so this branch is compiled away outside development.
+  if code_reloading? do
+    socket "/phoenix/live_reload/socket", Phoenix.LiveReloader.Socket
+    plug Phoenix.LiveReloader
+    plug Phoenix.CodeReloader
+  end
+
   plug Plug.RequestId
   plug Plug.Telemetry, event_prefix: [:phoenix, :endpoint]
 

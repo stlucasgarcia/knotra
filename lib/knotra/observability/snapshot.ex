@@ -20,13 +20,35 @@ defmodule Knotra.Observability.Snapshot do
   def build(records, opts) do
     records = Enum.sort_by(records, &{&1.started_at, &1.seq}, :desc)
     agents = agents(records)
+    swarms = opts |> Keyword.get(:swarms, []) |> Enum.sort_by(& &1.started_at, :desc)
 
     %{
-      stats: stats(records, agents),
+      stats: stats(records, agents, swarms),
       agents: agents,
       executions: Enum.map(records, &summary/1),
+      swarms: Enum.map(swarms, &swarm_summary/1),
       graph: graph(records, Keyword.get(opts, :links, [])),
       messages: messages(records, Keyword.get(opts, :message_limit, 200))
+    }
+  end
+
+  def swarm_summary(swarm) do
+    %{
+      id: swarm.id,
+      mode: swarm.mode,
+      goal: swarm.goal,
+      status: swarm.status,
+      started_at: swarm.started_at,
+      updated_at: swarm.updated_at,
+      finished_at: swarm.finished_at,
+      elapsed_ms: max((swarm.finished_at || swarm.updated_at) - swarm.started_at, 0),
+      agents: length(swarm.agents),
+      created_agents: swarm.agents |> Enum.filter(& &1.created) |> Enum.map(& &1.name),
+      tasks: length(swarm.tasks),
+      escalations: length(swarm.escalations),
+      output: swarm.output,
+      error: swarm.error,
+      planner_model: get_in(swarm, [:planner, :model])
     }
   end
 
@@ -40,7 +62,7 @@ defmodule Knotra.Observability.Snapshot do
     |> Map.put(:timings, timings)
   end
 
-  defp stats(records, agents) do
+  defp stats(records, agents, swarms) do
     models =
       records |> Enum.map(& &1.definition.model.id) |> Enum.reject(&is_nil/1) |> Enum.uniq()
 
@@ -53,6 +75,9 @@ defmodule Knotra.Observability.Snapshot do
       agents: length(agents),
       models: models,
       events: Enum.reduce(records, 0, &(&1.event_count + &2)),
+      swarms: length(swarms),
+      swarms_running: Enum.count(swarms, &(&1.status == :running)),
+      swarms_failed: Enum.count(swarms, &(&1.status in [:failed, :partial])),
       newest_started_at:
         case records do
           [first | _] -> first.started_at

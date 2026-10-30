@@ -83,13 +83,34 @@ defmodule KnotraBots do
 
   @doc "ReqLLM options for a bot, including its system prompt when it has one."
   def model_options(model, system_prompt) do
-    opts = [max_tokens: 1024]
+    # Short chat replies and tool proposals. Gemini 2.5 counts thinking tokens
+    # against max_tokens, so a small budget can end the turn before any text is
+    # emitted (`finish_reason: :length` becomes :incomplete_response).
+    opts = [max_tokens: 2048]
 
     opts =
       if system_prompt in [nil, ""],
         do: opts,
         else: Keyword.put(opts, :system_prompt, system_prompt)
 
+    opts
+    |> thinking_options(model)
+    |> google_api_key(model)
+  end
+
+  # Gemini 2.5 disables thinking at budget 0. The demo's replies are short, and
+  # spending the output budget on hidden reasoning makes swarms fail opaquely.
+  defp thinking_options(opts, "google:" <> model) do
+    if String.starts_with?(model, "gemini-2.5") do
+      Keyword.put(opts, :google_thinking_budget, 0)
+    else
+      opts
+    end
+  end
+
+  defp thinking_options(opts, _model), do: opts
+
+  defp google_api_key(opts, model) do
     case {provider(model), System.get_env("GOOGLE_API_KEY"), System.get_env("GEMINI_API_KEY")} do
       {"google", google, key} when google in [nil, ""] and is_binary(key) and key != "" ->
         # `.env.example` sets GOOGLE_API_KEY to ""; treat that as absent. Never
@@ -140,6 +161,9 @@ defmodule KnotraBots do
   def model_status, do: model_status(configured_model())
 
   def notices_path, do: Application.get_env(:knotra_bots, :notices_path)
+
+  @doc "Append-only ledger for the demo's mocked write effects (refunds, restocks)."
+  def effects_path, do: Application.get_env(:knotra_bots, :effects_path)
 
   def start_instance, do: KnotraBots.Application.start_instance()
   def stop_instance, do: KnotraBots.Application.stop_instance()

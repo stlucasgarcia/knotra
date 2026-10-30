@@ -9,6 +9,7 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
       {:overview, "Overview"},
       {:executions, "Executions"},
       {:agents, "Agents"},
+      {:swarms, "Swarms"},
       {:topology, "Topology"},
       {:messages, "Messages"}
     ]
@@ -114,6 +115,11 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
     .k-metric.is-failed strong { color: var(--k-red); }
     .k-grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; align-items: start; }
     .k-list { display: flex; flex-direction: column; gap: 6px; }
+    .k-row-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+    .k-swarm-agent { display: flex; flex-direction: column; gap: 4px; padding: 9px; background: var(--k-panel-2); border-radius: 10px; }
+    .k-swarm-agent details { font-size: 0.75rem; }
+    .k-swarm-agent pre { max-height: 160px; overflow: auto; }
+    .k-timeline { display: flex; flex-direction: column; gap: 6px; }
     .k-row-card {
       display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 12px;
       width: 100%; text-align: left; background: var(--k-panel-2); border: 1px solid transparent;
@@ -251,6 +257,7 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
         |> assign(:tab, :overview)
         |> assign(:selected_id, nil)
         |> assign(:selected, nil)
+        |> assign(:selected_swarm, nil)
         |> assign(:status_filter, "all")
         |> assign(:kind_filter, "all")
         |> assign(:query, "")
@@ -317,11 +324,19 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
     end
 
     def handle_event("select", %{"id" => id}, socket) do
-      {:noreply, load_selected(socket, id)}
+      {:noreply, socket |> assign(:selected_swarm, nil) |> load_selected(id)}
+    end
+
+    def handle_event("select_swarm", %{"id" => id}, socket) do
+      {:noreply, load_swarm(socket, id)}
     end
 
     def handle_event("close", _params, socket) do
       {:noreply, assign(socket, selected_id: nil, selected: nil)}
+    end
+
+    def handle_event("close_swarm", _params, socket) do
+      {:noreply, assign(socket, selected_swarm: nil)}
     end
 
     def handle_event("toggle_pause", _params, socket) do
@@ -342,6 +357,7 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
           |> assign(:error, nil)
           |> assign(:last_updated, System.system_time(:millisecond))
           |> refresh_selected()
+          |> refresh_selected_swarm()
 
         {:error, reason} ->
           assign(socket, :error, reason)
@@ -351,6 +367,22 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
     defp refresh_selected(%{assigns: %{selected_id: nil}} = socket), do: socket
 
     defp refresh_selected(socket), do: load_selected(socket, socket.assigns.selected_id)
+
+    defp refresh_selected_swarm(%{assigns: %{selected_swarm: nil}} = socket), do: socket
+
+    defp refresh_selected_swarm(socket) do
+      load_swarm(socket, socket.assigns.selected_swarm.swarm.id)
+    end
+
+    defp load_swarm(socket, id) do
+      case Observability.swarm(socket.assigns.instance, id) do
+        {:ok, swarm} ->
+          assign(socket, selected_swarm: swarm, selected_id: nil, selected: nil)
+
+        {:error, _reason} ->
+          assign(socket, selected_swarm: nil, error: :swarm_not_found)
+      end
+    end
 
     defp load_selected(socket, id) do
       case Observability.execution(socket.assigns.instance, cast_id(id)) do
@@ -375,10 +407,14 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
           agents: 0,
           models: [],
           events: 0,
+          swarms: 0,
+          swarms_running: 0,
+          swarms_failed: 0,
           newest_started_at: nil
         },
         agents: [],
         executions: [],
+        swarms: [],
         graph: %{conversations: [], edges: [], agent_edges: [], links: []},
         messages: []
       }
@@ -398,6 +434,7 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
         assign(assigns,
           executions: executions,
           messages: messages,
+          swarms: assigns.snapshot.swarms,
           active: active,
           tabs: @tabs,
           statuses: @statuses,
@@ -445,6 +482,7 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
             {label}
             <span :if={key == :executions} class="k-count">{length(@snapshot.executions)}</span>
             <span :if={key == :agents} class="k-count">{length(@snapshot.agents)}</span>
+            <span :if={key == :swarms} class="k-count">{length(@snapshot.swarms)}</span>
             <span :if={key == :messages} class="k-count">{length(@snapshot.messages)}</span>
           </button>
         </nav>
@@ -467,6 +505,11 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
               selected_id={@selected_id}
             />
             <.agents_tab :if={@tab == :agents} agents={@snapshot.agents} selected_id={@selected_id} />
+            <.swarms_tab
+              :if={@tab == :swarms}
+              swarms={@swarms}
+              selected_swarm_id={@selected_swarm && @selected_swarm.swarm.id}
+            />
             <.topology_tab :if={@tab == :topology} graph={@snapshot.graph} selected_id={@selected_id} />
             <.messages_tab
               :if={@tab == :messages}
@@ -477,6 +520,10 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
               query={@query}
             />
           </main>
+
+          <aside :if={@selected_swarm} class="k-detail">
+            <.swarm_detail detail={@selected_swarm} />
+          </aside>
 
           <aside :if={@selected} class="k-detail">
             <.detail selected={@selected} />
@@ -774,6 +821,206 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
         </div>
       </section>
       """
+    end
+
+    attr(:swarms, :list, required: true)
+    attr(:selected_swarm_id, :any, required: true)
+
+    defp swarms_tab(assigns) do
+      ~H"""
+      <section class="k-panel">
+        <header class="k-panel-head">
+          <h2>Swarms</h2>
+          <span class="k-muted">{length(@swarms)} retained</span>
+        </header>
+
+        <p :if={@swarms == []} class="k-empty">
+          No swarm recorded. Start one with <code>Knotra.Swarm.run/3</code>.
+        </p>
+
+        <div :if={@swarms != []} class="k-table-wrap">
+          <table class="k-table">
+            <thead>
+              <tr>
+                <th>Status</th>
+                <th>Mode</th>
+                <th>Goal</th>
+                <th>Agents</th>
+                <th>Created</th>
+                <th>Tasks</th>
+                <th>Escalations</th>
+                <th>Started</th>
+                <th>Duration</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr
+                :for={swarm <- @swarms}
+                class={["k-row", @selected_swarm_id == swarm.id && "is-selected"]}
+                phx-click="select_swarm"
+                phx-value-id={swarm.id}
+              >
+                <td><.status_badge status={swarm.status} /></td>
+                <td>{swarm.mode}</td>
+                <td class="k-preview">{truncate(swarm.goal, 56)}</td>
+                <td>{swarm.agents}</td>
+                <td>{Enum.join(swarm.created_agents, ", ")}</td>
+                <td>{swarm.tasks}</td>
+                <td>{swarm.escalations}</td>
+                <td>{format_clock(swarm.started_at)}</td>
+                <td>{format_duration(swarm.elapsed_ms)}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+      """
+    end
+
+    attr(:detail, :map, required: true)
+
+    defp swarm_detail(assigns) do
+      ~H"""
+      <div class="k-detail-head">
+        <div>
+          <span class="k-eyebrow">Swarm · coordinator</span>
+          <h2><code>{short_id(@detail.swarm.id)}</code></h2>
+        </div>
+        <button class="k-icon-btn" phx-click="close_swarm" title="Close detail">×</button>
+      </div>
+
+      <div class="k-detail-meta">
+        <.status_badge status={@detail.swarm.status} />
+        <span>{to_string(@detail.swarm.mode)} · {format_duration(@detail.swarm.elapsed_ms)}</span>
+        <span>started {format_clock(@detail.swarm.started_at)}</span>
+      </div>
+
+      <h3 class="k-section-title">Goal</h3>
+      <p class="k-input">{@detail.swarm.goal}</p>
+
+      <h3 class="k-section-title">Coordinator output</h3>
+      <p :if={@detail.swarm.planner == nil} class="k-muted">No planner trace recorded.</p>
+      <div :if={@detail.swarm.planner != nil} class="k-callout is-ok">
+        <strong>{@detail.swarm.planner[:model] || "coordinator"}</strong>
+        <pre>{@detail.swarm.planner[:output] || "(no output)"}</pre>
+        <p :if={@detail.swarm.planner[:fallback]} class="k-muted">
+          Fallback: {inspect(@detail.swarm.planner[:fallback])}
+        </p>
+        <details>
+          <summary>Planner input</summary>
+          <pre>{@detail.swarm.planner[:input]}</pre>
+        </details>
+      </div>
+
+      <h3 class="k-section-title">Agents</h3>
+      <div class="k-list">
+        <article :for={agent <- @detail.swarm.agents} class="k-swarm-agent">
+          <div class="k-row-head">
+            <strong>{agent.name}</strong>
+            <span class="k-muted">
+              {if agent.created, do: "created", else: "existing"} · {Enum.join(agent.tools, ", ")}
+            </span>
+          </div>
+          <details :if={agent.prompt}>
+            <summary>Initial prompt</summary>
+            <pre>{agent.prompt}</pre>
+          </details>
+          <code>{agent.version}</code>
+        </article>
+      </div>
+
+      <h3 class="k-section-title">Tasks</h3>
+      <p :if={@detail.swarm.tasks == []} class="k-muted">No tasks recorded.</p>
+      <div :if={@detail.swarm.tasks != []} class="k-table-wrap">
+        <table class="k-table">
+          <thead>
+            <tr><th>Task</th><th>Agent</th><th>Iteration</th><th>Status</th><th>Duration</th></tr>
+          </thead>
+          <tbody>
+            <tr :for={task <- @detail.swarm.tasks}>
+              <td><code>{task.id}</code></td>
+              <td>{task.agent}</td>
+              <td>{task.iteration}</td>
+              <td>{to_string(task.status)}</td>
+              <td>{format_duration(task.elapsed_ms)}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3 :if={@detail.swarm.escalations != []} class="k-section-title">Escalations</h3>
+      <div :if={@detail.swarm.escalations != []} class="k-list">
+        <article :for={escalation <- @detail.swarm.escalations} class="k-swarm-agent">
+          <div class="k-row-head">
+            <strong>{escalation.tool}</strong>
+            <span class="k-muted">{escalation.agent} · {inspect(escalation.reason)}</span>
+          </div>
+          <code>{inspect(escalation.arguments)}</code>
+        </article>
+      </div>
+
+      <h3 class="k-section-title">
+        Timeline
+        <span class="k-muted">coordinator + member executions in event order</span>
+      </h3>
+      <div class="k-timeline">
+        <div :for={event <- @detail.timeline} class={["k-event", "is-" <> to_string(event.type)]}>
+          <div class="k-event-head">
+            <span class="k-seq">{event.offset_ms} ms</span>
+            <strong>{to_string(event.type)}</strong>
+            <span class="k-muted">{event.source}</span>
+          </div>
+          <p>{swarm_event_text(event)}</p>
+        </div>
+      </div>
+      """
+    end
+
+    defp swarm_event_text(%{source: "coordinator"} = event) do
+      data = event.data || %{}
+
+      case event.type do
+        :started ->
+          "mode #{data[:mode]} · goal: #{data[:goal]}"
+
+        :planned ->
+          "planned #{length(Map.get(data, :agents, []))} agents and " <>
+            "#{length(Map.get(data, :tasks, []))} tasks"
+
+        :task_started ->
+          "task #{data[:id]} → #{data[:agent]} (iteration #{data[:iteration]})"
+
+        :task_finished ->
+          "task #{data[:id]} by #{data[:agent]}: #{data[:status]}" <>
+            if(data[:error], do: " (#{inspect(data[:error])})", else: "")
+
+        :escalation ->
+          "#{data[:tool]} by #{data[:agent]}: #{inspect(data[:reason])} · #{inspect(data[:arguments])}"
+
+        :finished ->
+          "swarm #{data[:status]} in #{data[:elapsed_ms]} ms"
+
+        _other ->
+          inspect(data)
+      end
+    end
+
+    defp swarm_event_text(event) do
+      data = event.data || %{}
+
+      case event.type do
+        :model_started -> "model call started"
+        :model_result -> Map.get(data, :text, "")
+        :tool_result -> Map.get(data, :output, "")
+        :tool_started -> "calling #{get_in(data, [:call, :name])}"
+        :started -> Map.get(data, :input, "")
+        :completed -> Map.get(data, :output) || "completed"
+        :failed -> "failed: #{inspect(Map.get(data, :error))}"
+        :blocked -> "blocked: #{inspect(Map.get(data, :error))}"
+        :waiting -> Map.get(data, :prompt, "waiting")
+        :retry -> "retry: #{inspect(Map.get(data, :reason))}"
+        _other -> truncate(inspect(data), 600)
+      end
     end
 
     attr(:selected, :map, required: true)
@@ -1277,8 +1524,11 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
 
     defp status_key(status) when status in [:running, :accepted], do: "running"
 
-    defp status_key(status) when status in [:failed, :blocked, :cancelled, :rejected, :expired],
-      do: "failed"
+    defp status_key(status)
+         when status in [:failed, :blocked, :cancelled, :rejected, :expired, :timeout],
+         do: "failed"
+
+    defp status_key(:partial), do: "waiting"
 
     defp status_key(status), do: to_string(status)
 

@@ -10,8 +10,10 @@ defmodule Knotra.Observability do
   it does not survive a BEAM restart and never contains authorization context or
   private model continuations.
 
-  Use the public read functions directly, or mount `Knotra.Dashboard.Live` in a
-  Phoenix LiveView host.
+  `Knotra.Swarm` records coordinator runs in the same store: planner trace,
+  created agents, assigned tasks, escalations and a merged coordinator/member
+  timeline. Use `swarms/1` and `swarm/2`, or mount `Knotra.Dashboard.Live` in a
+  Phoenix LiveView host for the Swarms tab.
 
   ## Correlation
 
@@ -85,6 +87,26 @@ defmodule Knotra.Observability do
   @spec agents(instance()) :: {:ok, [map()]} | {:error, :not_found}
   def agents(instance) do
     with {:ok, snapshot} <- snapshot(instance), do: {:ok, snapshot.agents}
+  end
+
+  @doc "Retained swarm/coordinator runs, newest first."
+  @spec swarms(instance()) :: {:ok, [map()]} | {:error, :not_found}
+  def swarms(instance) do
+    with {:ok, snapshot} <- snapshot(instance), do: {:ok, snapshot.swarms}
+  end
+
+  @doc """
+  One swarm with its coordinator events, created agents, tasks, escalations,
+  member execution details, and a merged timeline.
+  """
+  @spec swarm(instance(), String.t()) :: {:ok, map()} | {:error, :not_found}
+  def swarm(instance, id), do: call(instance, {:swarm, id})
+
+  @doc false
+  @spec swarm_event(instance(), String.t(), atom(), map()) :: :ok
+  def swarm_event(instance, id, type, data) when is_atom(type) and is_map(data) do
+    Store.record(instance, {:swarm_event, id, type, data})
+    :ok
   end
 
   @doc "Conversation flows, agent-to-agent edges, and explicit links."

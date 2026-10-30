@@ -7,6 +7,9 @@ defmodule KnotraBots.MixProject do
       version: "0.1.0",
       elixir: "~> 1.20",
       start_permanent: Mix.env() == :prod,
+      # Phoenix 1.8 requires its reloader as a Mix listener; without it the
+      # dev code reloader warns and cannot recompile through the listener path.
+      listeners: [Phoenix.CodeReloader],
       aliases: [setup: ["deps.get", "knotra_bots.migrate"]],
       deps: deps()
     ]
@@ -30,7 +33,9 @@ defmodule KnotraBots.MixProject do
       {:ecto_sql, "~> 3.14"},
       {:ecto_sqlite3, "~> 0.25.0"},
       {:dotenvy, "~> 1.1"},
-      {:lazy_html, ">= 0.1.0", only: :test}
+      {:phoenix_live_reload, "~> 1.5", only: :dev},
+      {:lazy_html, ">= 0.1.0", only: :test},
+      {:tribunal, "~> 3.0", only: :test}
     ]
   end
 end

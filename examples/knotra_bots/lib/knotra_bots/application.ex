@@ -10,6 +10,7 @@ defmodule KnotraBots.Application do
       {Phoenix.PubSub, name: KnotraBots.PubSub},
       KnotraBots.Repo,
       instance_spec(),
+      {Task.Supervisor, name: KnotraBots.TaskSupervisor},
       KnotraBots.Chat,
       KnotraBotsWeb.Endpoint
     ]
@@ -37,7 +38,15 @@ defmodule KnotraBots.Application do
      durable: [
        repo: KnotraBots.Repo,
        access: KnotraBots.Access,
-       demo_tools: [KnotraBots.Tools.Lookup, KnotraBots.Tools.Notify],
+       demo_tools: [
+         KnotraBots.Tools.OrderLookup,
+         KnotraBots.Tools.CustomerLookup,
+         KnotraBots.Tools.StockLookup,
+         KnotraBots.Tools.ReturnPolicy,
+         KnotraBots.Tools.Notify,
+         KnotraBots.Tools.Refund,
+         KnotraBots.Tools.Restock
+       ],
        max_pending: 50
      ]}
   end

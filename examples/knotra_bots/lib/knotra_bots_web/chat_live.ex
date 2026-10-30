@@ -494,7 +494,7 @@ defmodule KnotraBotsWeb.ChatLive do
   defp elapsed([]), do: 0
   defp elapsed(events), do: List.last(events).elapsed_ms
 
-  # Prefer the channel with most agents on `/`: the seeded multi-agent Ops room.
+  # Prefer the channel with most agents on `/`: the seeded #storefront-ops room.
   defp landing_channel([]), do: nil
   defp landing_channel(channels), do: Enum.max_by(channels, &length(Channels.agents(&1.id)))
 
