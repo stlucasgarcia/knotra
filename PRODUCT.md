@@ -48,7 +48,7 @@ Confirmed next milestone: make the durable production contract real (host Postgr
 
 ## Brand Commitments
 
-Name: Knotra. Documentation voice is already established and binding: factual, claim-skeptical, "implemented / planned / exploratory" status labels, no marketing superlatives, limitations stated next to capabilities. No logo, palette or visual identity exists.
+Name: Knotra. Documentation voice is already established and binding: factual, claim-skeptical, "implemented / planned / exploratory" status labels, no marketing superlatives, limitations stated next to capabilities. The visual identity is defined in [DESIGN.md](DESIGN.md); there is no logo yet.
 
 ## Evidence on Hand
 

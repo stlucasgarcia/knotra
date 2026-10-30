@@ -259,7 +259,7 @@ A popover anchored above the composer and spanning its width: paper fill, 1px ru
 An inline block inside the message it gates — never a dialog: 10px radius, 1px border, 10px 12px padding, ochre wash for clarifications and approval wash for write approvals. The title is 0.72rem uppercase at 0.08em tracking; the operation name is mono, and the validated arguments sit in a paper `<pre>` at 0.76rem with an 8px radius inside a rule. Actions are a ghost/ink button pair. The approval variant swaps only border and fill — the title keeps ochre, so the red seal is carried by the border and wash alone. Read-only gates are answered by host policy and leave their event in the trace; write gates wait for a human.
 
 ### Metric Tile
-A sheet card, 14px radius, 12px 14px padding, stacking a 0.68rem uppercase 0.08em grey label over a metric value with a 2px gap. The tile never tints; only the number takes the status hue — ochre for running or waiting, registry green for completed, red for failed. Tiles reflow on an `auto-fit` grid with a 120px minimum.
+A sheet card, 14px radius, 12px 14px padding, stacking a 0.68rem uppercase 0.08em grey label over a metric value with a 2px gap. The tile never tints; only the number takes the status hue — registry green for running, ochre for waiting, registry green for completed, red for failed. Tiles reflow on an `auto-fit` grid with a 120px minimum.
 
 ## Do's and Don'ts
 
