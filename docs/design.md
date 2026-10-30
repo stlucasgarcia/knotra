@@ -1,6 +1,6 @@
 # Knotra: agreed design and first milestone
 
-Status: historical milestone-1 scope, implemented as a non-durable prototype; production guarantees remain deferred. This document preserves that milestone's design and evidence, not the complete current runtime. [ARCHITECTURE.md](../ARCHITECTURE.md) distinguishes the implemented [opt-in approval slice](durable-approvals.md) from future interactive, voice, delegation and generated-code branches. [ADR 0001](adr/0001-ecto-sqlite-persistence.md) supersedes the original ReqLLM-only restriction specifically for the approved Ecto/SQLite persistence integration; other dependencies still require authorization. Historical comparative evidence: [Elixir alternatives](research/elixir-agent-alternatives.md). Domain vocabulary: [CONTEXT.md](../CONTEXT.md).
+Status: historical milestone-1 scope, implemented as a non-durable prototype; production guarantees remain deferred. This document preserves that milestone's design and evidence, not the complete current runtime. [ARCHITECTURE.md](../ARCHITECTURE.md) distinguishes the implemented [opt-in approval slice](durable-approvals.md) from future interactive, voice, delegation and generated-code branches. [ADR 0001](adr/0001-ecto-sqlite-persistence.md) supersedes the original ReqLLM-only restriction specifically for the approved Ecto/SQLite persistence integration; other dependencies still require authorization. Historical comparative evidence: [Elixir alternatives](research/elixir-agent-alternatives.md). Domain vocabulary: [GLOSSARY.md](../GLOSSARY.md).
 
 ## Purpose
 
