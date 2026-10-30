@@ -258,6 +258,7 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
         |> assign(:error, if(instance, do: nil, else: :missing_instance))
         |> assign(:snapshot, empty_snapshot())
         |> assign(:last_updated, nil)
+        |> assign(:refresh_pending, false)
 
       if instance && connected?(socket) do
         Observability.subscribe(instance)
@@ -268,13 +269,32 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
     end
 
     @impl true
+    def handle_info({:knotra_observability, _instance}, %{assigns: %{paused: true}} = socket) do
+      {:noreply, socket}
+    end
+
     def handle_info({:knotra_observability, _instance}, socket) do
-      {:noreply, if(socket.assigns.paused, do: socket, else: load(socket))}
+      if socket.assigns.refresh_pending do
+        {:noreply, socket}
+      else
+        # Coalesce a burst of store notifications into one snapshot read.
+        Process.send_after(self(), :refresh, 250)
+        {:noreply, assign(socket, :refresh_pending, true)}
+      end
+    end
+
+    def handle_info(:refresh, socket) do
+      {:noreply, socket |> assign(:refresh_pending, false) |> load()}
     end
 
     def handle_info(:tick, socket) do
       schedule_tick()
-      {:noreply, if(socket.assigns.paused, do: socket, else: load(socket))}
+
+      if socket.assigns.paused or socket.assigns.refresh_pending do
+        {:noreply, socket}
+      else
+        {:noreply, load(socket)}
+      end
     end
 
     def handle_info(_message, socket), do: {:noreply, socket}

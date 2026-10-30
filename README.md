@@ -91,14 +91,17 @@ import Knotra.Dashboard.Router
 scope "/" do
   pipe_through [:browser, :require_admin]
 
-  knotra_dashboard "/knotra", instance: MyApp.Agents
+  knotra_dashboard "/knotra",
+    instance: MyApp.Agents,
+    on_mount: [{MyAppWeb.AdminAuth, :default}]
 end
 ```
 
-The route renders execution inputs, model text, and tool arguments. Protect it
-with the host's own authentication and authorization; the library does not
-provide access control. `Knotra.Dashboard.available?/0` reports whether the
-LiveView modules were compiled into the build.
+The route renders execution inputs, model text, and tool arguments. Router plugs
+run only for the initial HTTP request; `on_mount` runs again on every connected
+mount, including reconnects, so it must enforce the same authorization there.
+The library does not provide access control. `Knotra.Dashboard.available?/0`
+reports whether the LiveView modules were compiled into the build.
 
 The dashboard has five surfaces:
 

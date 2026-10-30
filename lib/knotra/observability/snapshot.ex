@@ -31,7 +31,7 @@ defmodule Knotra.Observability.Snapshot do
   end
 
   def summary(record) do
-    timings = Knotra.Observability.Timing.summary(Enum.reverse(record.events))
+    timings = Knotra.Observability.Timing.summary(:queue.to_list(record.events))
 
     record
     |> Map.drop([:events])
@@ -176,7 +176,7 @@ defmodule Knotra.Observability.Snapshot do
         id: id,
         agents: runs |> Enum.map(&agent_of/1) |> Enum.uniq(),
         started_at: hd(runs).started_at,
-        updated_at: List.last(runs).updated_at,
+        updated_at: runs |> Enum.map(& &1.updated_at) |> Enum.max(),
         executions: Enum.map(runs, &execution_node/1)
       }
     end)
@@ -239,14 +239,11 @@ defmodule Knotra.Observability.Snapshot do
     records
     |> Enum.flat_map(fn record ->
       record.events
+      |> :queue.to_list()
+      |> Enum.reverse()
+      |> Enum.filter(&(&1.type in @message_events))
       |> Enum.take(limit)
-      |> Enum.flat_map(fn event ->
-        if event.type in @message_events do
-          [{record.started_at + event.elapsed_ms, record, event}]
-        else
-          []
-        end
-      end)
+      |> Enum.map(fn event -> {record.started_at + event.elapsed_ms, record, event} end)
     end)
     |> Enum.sort_by(&elem(&1, 0), :desc)
     |> Enum.take(limit)

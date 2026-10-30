@@ -18,7 +18,7 @@ database =
 
 # Reset only the example's default test database so `mix test` is deterministic
 # across runs; an explicit KNOTRA_BOTS_DB is left alone.
-if config_env() == :test do
+if config_env() == :test and System.get_env("KNOTRA_BOTS_DB") in [nil, ""] do
   default_test_db = Path.expand("../_build/knotra_bots-test.sqlite3", __DIR__)
 
   if Path.expand(database) == default_test_db do
@@ -44,6 +44,7 @@ model =
 
 config :knotra_bots,
   model: model,
+  dashboard_token: env.("KNOTRA_BOTS_DASHBOARD_TOKEN", nil),
   notices_path: Path.expand("../_build/notices.log", __DIR__)
 
 port = String.to_integer(env.("KNOTRA_BOTS_PORT", "4000"))

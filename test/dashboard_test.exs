@@ -1,9 +1,46 @@
 if Code.ensure_loaded?(Knotra.Dashboard.Live) do
+  defmodule Knotra.DashboardTest.RouterMount do
+    @moduledoc false
+    def on_mount(:default, _params, _session, socket), do: {:cont, socket}
+  end
+
+  # Helpers stay enabled here: the macro must compile under a normal Phoenix
+  # router, not only when a host disables helpers.
+  defmodule Knotra.DashboardTest.Router do
+    @moduledoc false
+    use Phoenix.Router, helpers: true
+
+    import Phoenix.LiveView.Router
+    import Knotra.Dashboard.Router
+
+    knotra_dashboard("/knotra",
+      instance: :unused,
+      on_mount: [{Knotra.DashboardTest.RouterMount, :default}]
+    )
+  end
+
   defmodule Knotra.DashboardTest do
     use ExUnit.Case, async: false
 
     alias Knotra.{Dashboard, Definition}
     alias Knotra.Dashboard.Live
+
+    test "the router macro compiles with helpers, names the helper, and forwards on_mount" do
+      assert [route] =
+               Enum.filter(
+                 Knotra.DashboardTest.Router.__routes__(),
+                 &(&1.plug == Phoenix.LiveView.Plug)
+               )
+
+      assert route.path == "/knotra"
+      assert route.helper == "knotra_dashboard"
+
+      assert %{
+               phoenix_live_view:
+                 {Live, :index, _opts,
+                  %{extra: %{on_mount: [%{id: {Knotra.DashboardTest.RouterMount, :default}}]}}}
+             } = route.metadata
+    end
 
     defmodule Model do
       @behaviour Knotra.Model

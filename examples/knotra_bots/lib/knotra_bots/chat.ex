@@ -28,6 +28,8 @@ defmodule KnotraBots.Chat do
   @max_hops 1
   @max_message 4_000
   @execution_timeout 120_000
+  @timeline_limit 200
+  @recovery_ms 5_000
 
   def start_link(_opts), do: GenServer.start_link(__MODULE__, :ok, name: __MODULE__)
 
@@ -65,6 +67,7 @@ defmodule KnotraBots.Chat do
 
       case Repo.transaction(fn ->
              Repo.insert!(human)
+             replies = Enum.map(replies, &freeze/1)
              Repo.insert_all(Message, rows(replies))
              human
            end) do
@@ -81,17 +84,19 @@ defmodule KnotraBots.Chat do
     end
   end
 
-  def messages(channel_id) do
+  def messages(channel_id, limit \\ @timeline_limit) do
     Repo.all(
       from(m in Message,
         where: m.channel_id == ^channel_id,
-        order_by: [asc: m.inserted_at, asc: m.id]
+        order_by: [desc: m.inserted_at, desc: m.id],
+        limit: ^limit
       )
     )
+    |> Enum.reverse()
   end
 
-  def with_snapshots(channel_id) do
-    Enum.map(messages(channel_id), fn message ->
+  def with_snapshots(channel_id, limit \\ @timeline_limit) do
+    Enum.map(messages(channel_id, limit), fn message ->
       %{message: message, snapshot: snapshot(message)}
     end)
   end
@@ -110,10 +115,12 @@ defmodule KnotraBots.Chat do
         {:error, :agent_missing}
 
       agent ->
+        definition = Agents.definition_from_snapshot(message.definition_snapshot, agent)
+
         case Knotra.answer(
                KnotraBots.Instance,
                execution_id,
-               Agents.definition(agent),
+               definition,
                scope,
                answer
              ) do
@@ -148,30 +155,34 @@ defmodule KnotraBots.Chat do
 
   @impl true
   def init(:ok) do
-    schedule()
-
     {:ok,
      %{
        auto_approval_logged: MapSet.new(),
-       auto_approval_retry: %{}
-     }}
+       auto_approval_retry: %{},
+       recovery_attempts: %{},
+       tick_timer: nil
+     }
+     |> schedule()}
   end
 
   @impl true
   def handle_info(:tick, state) do
-    schedule()
-
     state =
       Enum.reduce(pending_messages(), state, fn message, state ->
         sync(message, state)
       end)
 
-    {:noreply, state}
+    {:noreply, schedule(state)}
   end
 
   def handle_info(_message, state), do: {:noreply, state}
 
-  defp schedule, do: Process.send_after(self(), :tick, @tick_ms)
+  # Exactly one timer: a wake-up from `post/2` or `answer/3` replaces the
+  # pending timer instead of adding another polling loop.
+  defp schedule(state) do
+    if state.tick_timer, do: Process.cancel_timer(state.tick_timer)
+    %{state | tick_timer: Process.send_after(self(), :tick, @tick_ms)}
+  end
 
   defp pending_messages do
     Repo.all(
@@ -202,12 +213,13 @@ defmodule KnotraBots.Chat do
         })
 
       agent ->
-        definition = Agents.definition(agent)
+        {input, snapshot, version} = frozen(message, agent)
+        definition = Agents.definition_from_snapshot(snapshot, agent)
 
         case Knotra.submit(
                KnotraBots.Instance,
                definition,
-               transcript(message),
+               input,
                KnotraBots.scope(),
                "chat-" <> message.id,
                timeout: @execution_timeout
@@ -225,12 +237,13 @@ defmodule KnotraBots.Chat do
 
             put_message(message, %{
               execution_id: execution_id,
-              definition_version: definition.version,
+              definition_version: version,
               status: "running"
             })
 
-          {:error, reason} when reason in [:max_children, :pending_limit] ->
-            # Capacity is transient; the next tick retries the same key.
+          {:error, reason} when reason in [:max_children, :pending_limit, :unavailable] ->
+            # Capacity and a restarting runtime are transient; the next tick
+            # retries the same, already frozen request and key.
             :ok
 
           {:error, reason} ->
@@ -264,16 +277,69 @@ defmodule KnotraBots.Chat do
 
       %{status: status} when status in [:accepted, :running, :decided, :ready] ->
         put_message(message, %{status: "running"})
-        state
+        recover_if_due(message, state)
 
       %{status: :completed} = snapshot ->
-        updated = put_message(message, %{status: "completed", body: snapshot.output || ""})
-        maybe_chain(updated)
+        complete(message, snapshot.output || "")
         state
 
       %{status: status} = snapshot ->
         put_message(message, %{status: to_string(status), body: terminal_body(status, snapshot)})
         state
+    end
+  end
+
+  # A persisted accepted/running record may have no worker (capacity wait or a
+  # runtime restart). Recovery resumes it or records its blocked disposition.
+  # Throttled so a healthy execution is not re-read on every tick.
+  defp recover_if_due(message, state) do
+    now = now_ms()
+
+    if now - Map.get(state.recovery_attempts, message.id, 0) >= @recovery_ms do
+      _ = recover(message)
+
+      attempts = Map.put(state.recovery_attempts, message.id, now)
+      attempts = if map_size(attempts) > 200, do: %{message.id => now}, else: attempts
+      %{state | recovery_attempts: attempts}
+    else
+      state
+    end
+  end
+
+  defp recover(message) do
+    with %Agent{} = agent <- Agents.get(message.agent_id) do
+      definition = Agents.definition_from_snapshot(message.definition_snapshot, agent)
+      Knotra.recover(KnotraBots.Instance, message.execution_id, definition, KnotraBots.scope())
+    else
+      _ -> {:error, :agent_missing}
+    end
+  catch
+    :exit, _ -> {:error, :unavailable}
+  end
+
+  # The reply and any handoff it triggers commit together; a crash between the
+  # two writes cannot leave a completed parent without its follow-up.
+  defp complete(message, output) do
+    {:ok, updated} =
+      Repo.transaction(fn ->
+        updated = update_message!(message, %{status: "completed", body: output})
+        insert_chain(updated)
+        updated
+      end)
+
+    broadcast(updated.channel_id)
+    updated
+  end
+
+  defp update_message!(message, attrs) do
+    changes = Enum.reject(attrs, fn {key, value} -> Map.get(message, key) == value end)
+
+    if changes == [] do
+      message
+    else
+      message
+      |> Ecto.Changeset.change(Map.new(changes))
+      |> Repo.update!()
     end
   end
 
@@ -360,7 +426,7 @@ defmodule KnotraBots.Chat do
   defp reason(%{error: nil}), do: "no further detail"
   defp reason(%{error: error}), do: inspect(error)
 
-  defp maybe_chain(%Message{
+  defp insert_chain(%Message{
          status: "completed",
          channel_id: channel_id,
          root_id: root,
@@ -385,21 +451,56 @@ defmodule KnotraBots.Chat do
           agent.id != agent_id and agent.id not in already and mention?(agent, body)
         end)
 
-      if targets != [] do
+      if targets == [] do
+        false
+      else
         now = now()
 
         chain_messages =
           Enum.map(targets, fn agent ->
-            reply_message(channel, root, agent, now, hop + 1)
+            reply_message(channel, root, agent, now, hop + 1) |> freeze()
           end)
 
         Repo.insert_all(Message, rows(chain_messages))
-        broadcast(channel.id)
+        true
       end
+    else
+      _ -> false
     end
   end
 
-  defp maybe_chain(_message), do: :ok
+  defp insert_chain(_message), do: false
+
+  # Freeze the exact request a queued reply will submit. Later channel activity
+  # or agent edits must not rewrite an already accepted request.
+  defp freeze(message) do
+    agent = Agents.get(message.agent_id)
+
+    %{
+      message
+      | input: transcript(message),
+        definition_snapshot: agent && Agents.definition_snapshot(agent),
+        definition_version: agent && "agent-#{agent.id}-r#{agent.revision}"
+    }
+  end
+
+  defp frozen(message, agent) do
+    if is_binary(message.input) and is_binary(message.definition_snapshot) do
+      {message.input, message.definition_snapshot, message.definition_version}
+    else
+      snapshot = Agents.definition_snapshot(agent)
+      input = transcript(message)
+      version = "agent-#{agent.id}-r#{agent.revision}"
+
+      put_message(message, %{
+        input: input,
+        definition_snapshot: snapshot,
+        definition_version: version
+      })
+
+      {input, snapshot, version}
+    end
+  end
 
   defp reply_message(channel, root_id, agent, at, hop) do
     {status, body} =
@@ -438,9 +539,15 @@ defmodule KnotraBots.Chat do
     end
   end
 
-  defp transcript(message) do
+  # A first reply sees the channel history. A handoff sees only its own root
+  # request and the completed replies in that thread, so concurrent requests
+  # cannot leak into another agent's latest human turn.
+  defp transcript(%Message{hop: hop} = message) when hop > 0, do: thread_transcript(message)
+  defp transcript(message), do: channel_transcript(message)
+
+  defp channel_transcript(message) do
     channel = Channels.get!(message.channel_id)
-    agents = Map.new(Channels.agents(channel.id), &{&1.id, &1.name})
+    agents = agent_names(channel.id)
 
     prior =
       Repo.all(
@@ -453,14 +560,46 @@ defmodule KnotraBots.Chat do
         )
       )
 
-    lines =
-      Enum.map(prior, fn entry ->
-        case entry.author_type do
-          "human" -> "Human: #{entry.body}"
-          "agent" -> "#{Map.get(agents, entry.agent_id, "Agent")}: #{entry.body}"
-        end
-      end)
+    render_transcript(channel, Enum.map(prior, &entry_line(&1, agents)))
+  end
 
+  defp thread_transcript(%Message{root_id: root} = message) when is_binary(root) do
+    channel = Channels.get!(message.channel_id)
+    agents = agent_names(channel.id)
+
+    prior =
+      Repo.all(
+        from(m in Message,
+          where:
+            m.channel_id == ^channel.id and (m.id == ^root or m.root_id == ^root) and
+              m.inserted_at < ^message.inserted_at and
+              m.author_type != "system" and
+              (m.author_type == "human" or m.status == "completed"),
+          order_by: [asc: m.inserted_at]
+        )
+      )
+
+    render_transcript(channel, Enum.map(prior, &entry_line(&1, agents)))
+  end
+
+  defp thread_transcript(message), do: channel_transcript(message)
+
+  defp agent_names(channel_id) do
+    Map.new(Channels.agents(channel_id), &{&1.id, &1.name})
+  end
+
+  defp entry_line(entry, agents) do
+    # Indent continuation lines so a message body containing a blank line cannot
+    # be mistaken for a message boundary by a reader (or the fake model).
+    body = String.replace(entry.body, "\n", "\n  ")
+
+    case entry.author_type do
+      "human" -> "Human: " <> body
+      "agent" -> "#{Map.get(agents, entry.agent_id, "Agent")}: " <> body
+    end
+  end
+
+  defp render_transcript(channel, lines) do
     header = "Channel: ##{channel.name}"
     topic = if channel.topic in [nil, ""], do: "", else: "\nTopic: #{channel.topic}"
 

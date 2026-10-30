@@ -20,6 +20,14 @@ defmodule KnotraBotsWeb.Router do
     live "/channels", ChannelsLive, :index
     live "/channels/:id", ChatLive, :show
     live "/agents", AgentsLive, :index
-    knotra_dashboard("/observability", instance: KnotraBots.Instance)
+  end
+
+  scope "/" do
+    pipe_through [:browser, KnotraBotsWeb.DashboardAuth]
+
+    knotra_dashboard("/observability",
+      instance: KnotraBots.Instance,
+      on_mount: [{KnotraBotsWeb.DashboardAuth, :default}]
+    )
   end
 end

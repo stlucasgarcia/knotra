@@ -44,6 +44,23 @@ defmodule Knotra.Observability.TimingTest do
     assert second.other_ms == 10
   end
 
+  test "an approved tool after a wait still contributes tool time" do
+    events = [
+      event(1, 0, :model_started, %{}),
+      event(2, 20, :tool_started, %{call: call()}),
+      event(3, 30, :waiting, %{name: "lookup"}),
+      event(4, 140, :tool_result, %{call: call(), output: "ok"}),
+      event(5, 150, :completed, %{output: "done"})
+    ]
+
+    timings = Timing.summarize(events)
+
+    assert timings.tool_ms == 120
+    assert [turn] = timings.turns
+    assert turn.tool_ms == 0
+    assert turn.ended_ms == 30
+  end
+
   test "a running execution totals up to its newest event" do
     timings =
       Timing.summarize([

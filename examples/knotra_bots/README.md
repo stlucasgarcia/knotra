@@ -33,11 +33,17 @@ Open `http://localhost:4000` (not `127.0.0.1`; the LiveView socket origin check
 expects `localhost`). The landing page opens the seeded multi-agent `#Ops`
 channel.
 
-To run the whole demo with no key and no network:
+To run the whole demo with no key and no network, set the model before the first
+`mix setup`: seeding writes the configured model into the agent rows, and a
+later environment change does not rewrite them.
 
 ```sh
+KNOTRA_BOTS_MODEL=fake mix setup
 KNOTRA_BOTS_MODEL=fake mix phx.server
 ```
+
+If the agents were already seeded with an online model, edit them at `/agents`
+and choose the `fake` model, or delete the demo database and re-run setup.
 
 `.env` (copied from `.env.example`) is loaded in `config/runtime.exs` when present.
 An explicit environment variable wins over the file.
@@ -195,8 +201,12 @@ Every chat submission annotates its durable execution with the agent name,
 channel, conversation root, hop, and message id, so handoffs appear as connected
 conversation steps and as agent-to-agent edges. The dashboard reads the
 instance's bounded in-memory store: it covers work since this BEAM started, not
-durable history from before a restart. It is a debugging surface and must stay
-behind the host's authentication; it renders message text and tool arguments.
+durable history from before a restart. It is a debugging surface that renders
+message text and tool arguments, so the demo mounts it behind
+`KnotraBotsWeb.DashboardAuth`: loopback requests are allowed, and non-loopback
+requests need `KNOTRA_BOTS_DASHBOARD_TOKEN` as a `token` query parameter or an
+`x-dashboard-token` header. The same module is the route's `on_mount` hook, so a
+reconnect is re-authorized too.
 
 ## Tool approval policy
 
@@ -268,6 +278,7 @@ non-terminal messages.
 | `KNOTRA_BOTS_MODEL` | `google:gemini-2.5-flash` | Model string for seeded agents; `fake` is offline |
 | `KNOTRA_BOTS_PORT` | `4000` | HTTP port |
 | `KNOTRA_BOTS_DB` | `_build/knotra_bots-<env>.sqlite3` | SQLite database path |
+| `KNOTRA_BOTS_DASHBOARD_TOKEN` | — | Required for non-loopback access to `/observability` |
 | `SECRET_KEY_BASE` | dev default | Cookie/session signing key |
 
 `KNOTRA_BOTS_MODEL` sets the model seeded into the default agents; individual
@@ -295,6 +306,9 @@ This cut applies:
 4. `KnotraBots.Persistence.MigrationV4` — idempotently repairs an older
    `knotra_executions` table that is missing the `inserted_at` column and the
    status/tenant indexes. Fresh databases already have them.
+5. `KnotraBots.Persistence.MigrationV5` — idempotently adds the frozen `input`
+   and `definition_snapshot` columns to `messages`. Fresh databases get them from
+   migration 3.
 
 Knotra does not migrate on boot. A server started before `mix knotra_bots.migrate`
 has no tables to seed; the chat relay tolerates that boot order and starts working

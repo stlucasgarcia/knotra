@@ -73,16 +73,43 @@ defmodule KnotraBots.Agents do
   end
 
   def update(%Agent{} = agent, attrs) do
-    agent
-    |> Agent.changeset(attrs)
-    |> Ecto.Changeset.change(revision: agent.revision + 1)
-    |> Repo.update()
+    changeset = Agent.changeset(agent, attrs)
+
+    if changeset.valid? do
+      updated_at = NaiveDateTime.utc_now() |> NaiveDateTime.truncate(:second)
+
+      changes =
+        changeset.changes
+        |> Map.put(:updated_at, updated_at)
+        |> Map.put(:revision, agent.revision + 1)
+
+      set = Keyword.new(changes)
+
+      query =
+        from(a in Agent,
+          where: a.id == ^agent.id and a.revision == ^agent.revision,
+          update: [set: ^set]
+        )
+
+      case Repo.update_all(query, []) do
+        {1, _} ->
+          {:ok, struct(agent, changes)}
+
+        {0, _} ->
+          {:error, :stale}
+      end
+    else
+      {:error, changeset}
+    end
   end
 
   def update!(%Agent{} = agent, attrs) do
     case update(agent, attrs) do
       {:ok, agent} ->
         agent
+
+      {:error, :stale} ->
+        raise ArgumentError, "agent #{agent.id} changed since it was loaded"
 
       {:error, changeset} ->
         raise Ecto.InvalidChangesetError, action: :update, changeset: changeset
@@ -93,7 +120,52 @@ defmodule KnotraBots.Agents do
   def delete(%Agent{} = agent) do
     referenced? = Repo.exists?(from(ca in ChannelAgent, where: ca.agent_id == ^agent.id))
 
-    if referenced?, do: {:error, :referenced}, else: Repo.delete(agent)
+    if referenced? do
+      {:error, :referenced}
+    else
+      try do
+        case Repo.delete(agent) do
+          {:ok, deleted} -> {:ok, deleted}
+          {:error, changeset} -> {:error, changeset}
+        end
+      rescue
+        # A channel referencing the agent can commit between the check and the
+        # delete; the restrictive foreign key then rejects it.
+        Ecto.ConstraintError -> {:error, :referenced}
+      end
+    end
+  end
+
+  @doc "JSON snapshot of the fields a durable definition is built from."
+  def definition_snapshot(%Agent{} = agent) do
+    JSON.encode!(%{
+      "id" => agent.id,
+      "revision" => agent.revision,
+      "name" => agent.name,
+      "handle" => agent.handle,
+      "system_prompt" => agent.system_prompt,
+      "model" => agent.model,
+      "tools" => agent.tools
+    })
+  end
+
+  @doc "Rebuilds the definition a queued message was created with."
+  def definition_from_snapshot(json, %Agent{} = fallback) do
+    case json && JSON.decode(json) do
+      {:ok, snapshot} when is_map(snapshot) ->
+        definition(%Agent{
+          id: snapshot["id"],
+          revision: snapshot["revision"],
+          name: snapshot["name"],
+          handle: snapshot["handle"],
+          system_prompt: snapshot["system_prompt"],
+          model: snapshot["model"],
+          tools: snapshot["tools"]
+        })
+
+      _ ->
+        definition(fallback)
+    end
   end
 
   @doc """

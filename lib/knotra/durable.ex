@@ -608,10 +608,54 @@ defmodule Knotra.Durable do
     protect(fn ->
       with {:ok, config, tenant} <- access(instance, :inspect, nil, context),
            {:ok, status, limit} <- list_options(opts),
-           {:ok, rows} <- Persistence.list(config.repo, tenant, status, limit) do
-        refresh_and_decode(rows, config)
+           {:ok, snapshots} <- list_snapshots(config, tenant, status, limit) do
+        {:ok, snapshots}
       end
     end)
+  end
+
+  # Unfiltered listing returns the newest rows; lazy expiry only changes their
+  # status, never which rows exist.
+  defp list_snapshots(config, tenant, nil, limit) do
+    with {:ok, rows} <- Persistence.list(config.repo, tenant, nil, limit) do
+      refresh_and_decode(rows, config)
+    end
+  end
+
+  # A stored "waiting" row may materialize as expired. Scan both stored statuses
+  # newest-first, materialize each, then filter, so a status filter never returns
+  # a row whose refreshed status differs and never hides a newly expired one.
+  defp list_snapshots(config, tenant, status, limit) do
+    scan_list(config, tenant, status, list_statuses(status), 0, limit, [])
+  end
+
+  defp list_statuses("waiting"), do: ["waiting"]
+  defp list_statuses("expired"), do: ["expired", "waiting"]
+  defp list_statuses(status), do: [status]
+
+  defp scan_list(_config, _tenant, _status, _statuses, _offset, limit, acc)
+       when length(acc) >= limit do
+    {:ok, Enum.take(acc, limit)}
+  end
+
+  defp scan_list(config, tenant, status, statuses, offset, limit, acc) do
+    page = max(limit, 100)
+
+    with {:ok, rows} <- Persistence.list_window(config.repo, tenant, statuses, page, offset),
+         {:ok, snapshots} <- refresh_and_decode(rows, config) do
+      matches =
+        snapshots
+        |> Enum.filter(fn snapshot -> Atom.to_string(snapshot.status) == status end)
+        |> Enum.take(limit - length(acc))
+
+      acc = acc ++ matches
+
+      if length(rows) < page do
+        {:ok, acc}
+      else
+        scan_list(config, tenant, status, statuses, offset + page, limit, acc)
+      end
+    end
   end
 
   def close(instance, id, context) do

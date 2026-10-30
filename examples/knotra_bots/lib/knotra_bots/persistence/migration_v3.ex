@@ -59,6 +59,8 @@ defmodule KnotraBots.Persistence.MigrationV3 do
       add(:hop, :integer, null: false, default: 0)
       add(:execution_id, :string)
       add(:definition_version, :string)
+      add(:input, :text)
+      add(:definition_snapshot, :text)
       timestamps(type: :naive_datetime_usec)
     end
 

@@ -220,6 +220,57 @@ defmodule Knotra.ObservabilityTest do
     refute Enum.any?(executions, &(&1.id == first.id))
   end
 
+  test "does not evict a waiting execution", %{instance: _instance} do
+    instance = :"knotra_obs_waiting_#{System.unique_integer([:positive])}"
+
+    start_supervised!(
+      {Knotra,
+       name: instance,
+       max_executions: 2,
+       observability: [max_records: 1, max_events: 50, notify_ms: 0]}
+    )
+
+    definition = %{
+      version: "manual-v1",
+      model: %{id: "fake:manual"},
+      tools: [],
+      loop: nil,
+      tool_runtime: nil,
+      observer: nil
+    }
+
+    Knotra.Observability.Store.record(
+      instance,
+      {:register, %{id: "waiting", definition: definition, status: :waiting}}
+    )
+
+    Knotra.Observability.Store.record(
+      instance,
+      {:register, %{id: "done", definition: definition, status: :completed}}
+    )
+
+    assert :ok = Knotra.Observability.sync(instance)
+    assert {:ok, executions} = Knotra.Observability.executions(instance)
+    assert Enum.map(executions, & &1.id) == ["waiting"]
+    assert {:error, :not_found} = Knotra.Observability.execution(instance, "done")
+  end
+
+  test "filters message events before applying the message limit", %{instance: instance} do
+    _execution = run(instance, "hello")
+
+    assert {:ok, [message]} = Knotra.Observability.messages(instance, message_limit: 1)
+    assert message.text == "echo: hello"
+  end
+
+  test "bounds pending annotations for unknown executions", %{instance: instance} do
+    for i <- 1..300 do
+      assert :ok = Knotra.Observability.annotate(instance, "late-#{i}", %{agent: "a#{i}"})
+    end
+
+    [{store, _}] = Registry.lookup(instance, :observability)
+    assert map_size(:sys.get_state(store).pending_annotations) <= 200
+  end
+
   defp run(instance, input, opts \\ []) do
     assert {:ok, pid} = Knotra.start(instance, definition(), input, %{}, opts)
     assert %{status: status} = await(pid)

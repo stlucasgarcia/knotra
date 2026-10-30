@@ -2345,6 +2345,23 @@ defmodule Knotra.DurableTest do
              Knotra.list(__MODULE__, %{F.scope() | tenant: "tenant-b"}, limit: 10)
   end
 
+  test "list materializes expiry before applying the status filter and limit" do
+    {live_id, _definition, _answer} = pending_answer("list-live", response_timeout: 1_000_000)
+    {overdue_id, _definition, _answer} = pending_answer("list-overdue", response_timeout: 1_000)
+
+    assert {:ok, snapshot} = Knotra.snapshot(__MODULE__, overdue_id, F.scope())
+    assert {:ok, checkpoint} = Knotra.checkpoint(__MODULE__, overdue_id, F.scope())
+    F.expire_deadline(overdue_id, snapshot, checkpoint)
+
+    # The overdue row is the newest one. Filtering by :waiting must skip it
+    # rather than return it, and filtering by :expired must find it.
+    assert {:ok, [%{id: ^live_id, status: :waiting}]} =
+             Knotra.list(__MODULE__, F.scope(), status: :waiting, limit: 1)
+
+    assert {:ok, [%{id: ^overdue_id, status: :expired}]} =
+             Knotra.list(__MODULE__, F.scope(), status: :expired, limit: 1)
+  end
+
   test "close deletes terminal records and frees the pending bound" do
     definition = F.definition(owner: self())
     assert {:ok, id} = Knotra.submit(__MODULE__, definition, "Propose", F.scope(), "close-wait")

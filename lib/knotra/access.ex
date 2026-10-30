@@ -10,14 +10,13 @@ defmodule Knotra.Access do
   atomically with the decision or answer.
   Other actions may still return `{:ok, tenant_id}`. `:cancel` permits pre-admission
   durable cancellation; `:close` deletes one terminal or blocked record and releases
-  its capacity; `:list` is tenant-scoped inspection of public records.
+  its capacity. Listing authorizes with `:inspect` and a nil execution id.
   Inspection/recovery/answering/listing also materialize an already-due response
   expiry.
   """
   @callback authorize(
               :submit
               | :inspect
-              | :list
               | :checkpoint
               | :recover
               | :answer

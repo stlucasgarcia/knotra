@@ -9,7 +9,8 @@ defmodule Knotra.Observability.Timing do
   A turn starts at `:model_started` and ends at the next `:model_started`, a
   terminal status (including `:waiting`), or the last event, so it includes the
   model call and any tool work that follows it. A durable wait does not inflate
-  the turn duration.
+  the turn duration; a tool approved during the wait still contributes its
+  execution time to the aggregate `tool_ms`.
   `model_ms` is model-request to model-reply latency; `tool_ms` is the sum of
   completed tool calls in the turn.
   """
@@ -20,8 +21,8 @@ defmodule Knotra.Observability.Timing do
         %{elapsed_ms: elapsed} -> max(elapsed, 0)
       end
 
-    {turns, open, _tools} =
-      Enum.reduce(events, {[], nil, %{}}, fn event, {turns, open, tools} ->
+    {turns, open, _tools, detached_ms} =
+      Enum.reduce(events, {[], nil, %{}, 0}, fn event, {turns, open, tools, detached_ms} ->
         case event.type do
           :model_started ->
             turns = close_turn(open, event.elapsed_ms, turns)
@@ -39,7 +40,7 @@ defmodule Knotra.Observability.Timing do
               usage: nil
             }
 
-            {turns, turn, tools}
+            {turns, turn, tools, detached_ms}
 
           :model_result ->
             open =
@@ -55,20 +56,25 @@ defmodule Knotra.Observability.Timing do
                   }
               end
 
-            {turns, open, tools}
+            {turns, open, tools, detached_ms}
 
           :tool_started ->
-            {turns, open, put_tool(tools, event)}
+            {turns, open, put_tool(tools, event), detached_ms}
 
           :tool_result ->
-            {turns, open, tools} = take_tool(turns, open, tools, event)
-            {turns, open, tools}
+            {turns, open, tools, detached_ms} =
+              take_tool(turns, open, tools, detached_ms, event)
+
+            {turns, open, tools, detached_ms}
 
           type when type in @terminal ->
-            {close_turn(open, event.elapsed_ms, turns), nil, %{}}
+            # A wait closes the turn but keeps pending tool starts: the approved
+            # call runs after the wait, before the next model turn.
+            tools = if type == :waiting, do: tools, else: %{}
+            {close_turn(open, event.elapsed_ms, turns), nil, tools, detached_ms}
 
           _ ->
-            {turns, open, tools}
+            {turns, open, tools, detached_ms}
         end
       end)
 
@@ -76,7 +82,7 @@ defmodule Knotra.Observability.Timing do
 
     durations = Enum.map(turns, & &1.duration_ms)
     model_ms = Enum.sum(Enum.map(turns, & &1.model_ms))
-    tool_ms = Enum.sum(Enum.map(turns, & &1.tool_ms))
+    tool_ms = Enum.sum(Enum.map(turns, & &1.tool_ms)) + detached_ms
     turn_count = length(turns)
 
     %{
@@ -124,11 +130,14 @@ defmodule Knotra.Observability.Timing do
     end
   end
 
-  defp take_tool(turns, nil, tools, event) do
-    {turns, nil, delete_tool(tools, event)}
+  defp take_tool(turns, nil, tools, detached_ms, event) do
+    case tool_duration(tools, event) do
+      {:ok, duration, tools} -> {turns, nil, tools, detached_ms + duration}
+      :error -> {turns, nil, tools, detached_ms}
+    end
   end
 
-  defp take_tool(turns, open, tools, event) do
+  defp take_tool(turns, open, tools, detached_ms, event) do
     data = event.data || %{}
     call = Map.get(data, :call) || %{}
     id = call_id(call)
@@ -143,20 +152,24 @@ defmodule Knotra.Observability.Timing do
             tools: open.tools + 1
         }
 
-        {turns, turn, tools}
+        {turns, turn, tools, detached_ms}
 
       _ ->
-        {turns, open, tools}
+        {turns, open, tools, detached_ms}
     end
   end
 
-  defp delete_tool(tools, event) do
+  defp tool_duration(tools, event) do
     data = event.data || %{}
     call = Map.get(data, :call) || %{}
+    id = call_id(call)
 
-    case call_id(call) do
-      nil -> tools
-      id -> Map.delete(tools, id)
+    case id && Map.pop(tools, id) do
+      {started_ms, tools} when is_integer(started_ms) ->
+        {:ok, max(event.elapsed_ms - started_ms, 0), tools}
+
+      _ ->
+        :error
     end
   end
 

@@ -11,6 +11,7 @@ defmodule KnotraBotsTest do
 
   import Phoenix.ConnTest
   import Phoenix.LiveViewTest
+  import Plug.Conn, only: [put_req_header: 3]
 
   alias KnotraBots.{Agents, Channels, Chat}
 
@@ -371,6 +372,49 @@ defmodule KnotraBotsTest do
     messages = agent_messages(channel.id)
     assert length(messages) == 2
     assert Enum.map(messages, & &1.hop) == [0, 1]
+  end
+
+  test "an edit made from a stale revision is rejected", %{notices: _notices} do
+    agent = agent_fixture(%{"system_prompt" => "one"})
+    stale = Agents.get!(agent.id)
+
+    assert {:ok, updated} = Agents.update(agent, %{"system_prompt" => "two"})
+    assert updated.revision == agent.revision + 1
+
+    assert {:error, :stale} = Agents.update(stale, %{"system_prompt" => "three"})
+    assert Agents.get!(agent.id).system_prompt == "two"
+  end
+
+  test "a queued reply freezes its input and definition", %{notices: _notices} do
+    agent = agent_fixture(%{"name" => "Frozen", "handle" => unique_handle("frozen")})
+    channel = channel_fixture([agent])
+
+    assert {:ok, _human} = Chat.post(channel.id, "hello frozen")
+    [reply] = agent_messages(channel.id)
+
+    assert reply.input =~ "Human: hello frozen"
+    assert reply.definition_version =~ "r#{agent.revision}"
+
+    assert {:ok, _agent} = Agents.update(agent, %{"system_prompt" => "changed after queueing"})
+
+    assert Chat.messages(channel.id)
+           |> Enum.find(&(&1.id == reply.id))
+           |> Map.fetch!(:input) == reply.input
+  end
+
+  test "the dashboard rejects non-loopback requests without a token", %{notices: _notices} do
+    conn =
+      build_conn()
+      |> put_req_header("accept", "text/html")
+      |> Map.put(:remote_ip, {10, 0, 0, 1})
+
+    assert %{status: 404} = get(conn, "/observability")
+
+    Application.put_env(:knotra_bots, :dashboard_token, "dashboard-secret")
+    on_exit(fn -> Application.put_env(:knotra_bots, :dashboard_token, nil) end)
+
+    assert %{status: 200} = get(conn, "/observability?token=dashboard-secret")
+    assert %{status: 404} = get(conn, "/observability?token=wrong")
   end
 
   test "agents can be created, edited, and deleted only when unreferenced", %{notices: _notices} do

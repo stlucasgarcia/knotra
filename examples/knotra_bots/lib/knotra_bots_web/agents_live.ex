@@ -35,10 +35,20 @@ defmodule KnotraBotsWeb.AgentsLive do
       nil ->
         {:noreply, assign(socket, :error, "That agent no longer exists.")}
 
-      agent ->
-        case Agents.update(agent, agent_attrs(params)) do
-          {:ok, _agent} -> {:noreply, socket |> assign(:error, nil) |> assign_agents()}
-          {:error, changeset} -> {:noreply, assign(socket, :error, changeset_message(changeset))}
+      %{revision: revision} = agent ->
+        if to_string(revision) == params["revision"] do
+          case Agents.update(agent, agent_attrs(params)) do
+            {:ok, _agent} ->
+              {:noreply, socket |> assign(:error, nil) |> assign_agents()}
+
+            {:error, :stale} ->
+              {:noreply, assign(socket, :error, stale_message())}
+
+            {:error, changeset} ->
+              {:noreply, assign(socket, :error, changeset_message(changeset))}
+          end
+        else
+          {:noreply, assign(socket, :error, stale_message())}
         end
     end
   end
@@ -94,6 +104,9 @@ defmodule KnotraBotsWeb.AgentsLive do
     end)
   end
 
+  defp stale_message,
+    do: "This agent changed in another tab. Reload the page and try again."
+
   @impl true
   def render(assigns) do
     ~H"""
@@ -130,6 +143,7 @@ defmodule KnotraBotsWeb.AgentsLive do
 
             <form id={"agent-" <> agent.id} phx-submit="update" class="form">
               <input type="hidden" name="agent_id" value={agent.id} />
+              <input type="hidden" name="revision" value={agent.revision} />
               <.agent_fields agent={agent} models={@models} tool_names={@tool_names} />
               <div class="row">
                 <button type="submit">Save</button>

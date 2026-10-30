@@ -134,6 +134,21 @@ if Code.ensure_loaded?(Ecto.Schema) and Code.ensure_loaded?(Ecto.Migration) do
       end)
     end
 
+    @doc false
+    def list_window(repo, tenant, statuses, limit, offset) do
+      protect(fn ->
+        query =
+          from(r in Record,
+            where: r.tenant == ^tenant and r.status in ^statuses,
+            order_by: [desc: r.inserted_at, desc: r.id],
+            limit: ^limit,
+            offset: ^offset
+          )
+
+        {:ok, repo.all(query, log: false)}
+      end)
+    end
+
     def delete(repo, row, allowed_statuses) do
       protect(fn ->
         query =

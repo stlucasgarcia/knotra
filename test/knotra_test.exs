@@ -164,6 +164,18 @@ defmodule KnotraTest do
     def call(_args, _context), do: {:ok, "write"}
   end
 
+  defmodule ThrowingTool do
+    @behaviour Knotra.Tool
+    @impl true
+    def definition, do: throw(:boom)
+    @impl true
+    def validate(args), do: Receipt.validate(args)
+    @impl true
+    def authorize(_args, _context), do: :ok
+    @impl true
+    def call(_args, _context), do: {:ok, "unreachable"}
+  end
+
   defmodule NormalizingReceipt do
     @behaviour Knotra.Tool
     @impl true
@@ -678,6 +690,15 @@ defmodule KnotraTest do
 
     assert {:error, :invalid_tool_definitions} =
              Knotra.start(__MODULE__, write_only, "Email", auth)
+  end
+
+  test "a tool definition that throws returns an error instead of crashing the caller", %{
+    auth: auth
+  } do
+    respond = fn _ -> flunk("model must not run") end
+
+    assert {:error, :invalid_tool_definitions} =
+             Knotra.start(__MODULE__, definition(respond, tools: [ThrowingTool]), "Email", auth)
   end
 
   test "empty model output fails closed", %{auth: auth} do

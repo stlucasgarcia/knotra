@@ -56,6 +56,7 @@ defmodule Knotra.Observability do
   @type id :: String.t() | integer()
 
   @trace_keys [:conversation_id, :parent_id, :agent, :labels]
+  @max_labels 20
   @empty_trace %{conversation_id: nil, parent_id: nil, agent: nil, labels: %{}}
 
   @doc """
@@ -244,15 +245,20 @@ defmodule Knotra.Observability do
   defp normalize_labels(nil), do: {:ok, %{}}
 
   defp normalize_labels(labels) when is_map(labels) do
-    labels
-    |> Enum.reduce_while({:ok, %{}}, fn {key, value}, {:ok, acc} ->
-      with {:ok, key} <- label_key(key),
-           {:ok, value} <- label_value(value) do
-        {:cont, {:ok, Map.put(acc, key, value)}}
-      else
-        _ -> {:halt, :error}
-      end
-    end)
+    result =
+      labels
+      |> Enum.reduce_while({:ok, %{}}, fn {key, value}, {:ok, acc} ->
+        with {:ok, key} <- label_key(key),
+             {:ok, value} <- label_value(value) do
+          {:cont, {:ok, Map.put(acc, key, value)}}
+        else
+          _ -> {:halt, :error}
+        end
+      end)
+
+    with {:ok, labels} <- result do
+      {:ok, labels |> Enum.sort_by(fn {key, _} -> key end) |> Enum.take(@max_labels) |> Map.new()}
+    end
   end
 
   defp normalize_labels(_labels), do: :error
@@ -309,11 +315,11 @@ defmodule Knotra.Observability do
 
   defp call(instance, message) do
     GenServer.call(Store.via(instance), message)
+  rescue
+    # An unstarted instance has no registry at all; `Registry.whereis_name/1`
+    # raises instead of returning :undefined.
+    ArgumentError -> {:error, :not_found}
   catch
-    :exit, {:noproc, _} -> {:error, :not_found}
-    :exit, {:normal, _} -> {:error, :not_found}
-    :exit, {:shutdown, _} -> {:error, :not_found}
-    :exit, {{:shutdown, _}, _} -> {:error, :not_found}
     :exit, _ -> {:error, :not_found}
   end
 end

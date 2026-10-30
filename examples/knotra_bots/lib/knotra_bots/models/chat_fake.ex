@@ -48,10 +48,10 @@ defmodule KnotraBots.Models.ChatFake do
       handle != nil ->
         {:ok, %Knotra.Reply{text: "Handing this to @#{handle}."}}
 
-      order != nil ->
+      order != nil and has_tool?(tools, "lookup") ->
         proposal("lookup", %{"query" => order})
 
-      Enum.any?(tools, &(&1.name == "lookup")) and lookup_question?(line) ->
+      has_tool?(tools, "lookup") and lookup_question?(line) ->
         question("Which order should I look up?")
 
       true ->
@@ -98,6 +98,8 @@ defmodule KnotraBots.Models.ChatFake do
   end
 
   # The latest human turn, so a handoff still sees the request that started it.
+  # Continuation lines are indented by the transcript builder; undo that before
+  # matching, so a body containing a blank line keeps its paragraphs.
   defp last_human_line(input) do
     input
     |> String.split("\n\n", trim: true)
@@ -105,8 +107,15 @@ defmodule KnotraBots.Models.ChatFake do
     |> Enum.filter(&String.starts_with?(&1, "Human: "))
     |> List.last()
     |> case do
-      nil -> ""
-      line -> String.replace_prefix(line, "Human: ", "")
+      nil ->
+        ""
+
+      line ->
+        line
+        |> String.replace_prefix("Human: ", "")
+        |> String.replace("\n  ", "\n")
     end
   end
+
+  defp has_tool?(tools, name), do: Enum.any?(tools, &(&1.name == name))
 end

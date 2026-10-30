@@ -477,9 +477,11 @@ defmodule Knotra.Execution do
 
   defp block_durable(state, reason) do
     Process.cancel_timer(state.timer)
+    state = %{state | status: :blocked, error: reason}
+    Knotra.Observability.update(state)
 
     case Knotra.Durable.block_failed(state, reason) do
-      {:ok, snapshot} -> notify_released(%{state | status: :blocked, error: reason}, snapshot)
+      {:ok, snapshot} -> notify_released(state, snapshot)
       {:error, _} -> exit(:persistence_failed)
     end
   end
@@ -825,25 +827,19 @@ defmodule Knotra.Execution do
   @doc false
   def validate(definition, input, opts, durable \\ false) do
     if valid_options?(definition, input, opts) do
-      tools =
-        try do
-          tool_definitions(definition, durable)
-        rescue
-          _ -> {:error, :invalid_tool_definitions}
+      # Tool `definition/0` is host code. It may raise, throw, or exit; a
+      # preflight must return an error tuple instead of taking the caller down.
+      # Model tool preparation stays in `setup/2`, inside the supervised task
+      # and its deadline, and runs exactly once.
+      try do
+        case tool_definitions(definition, durable) do
+          {:ok, _tools} -> :ok
+          {:error, _reason} = error -> error
         end
-
-      prepared =
-        with {:ok, tools} <- tools do
-          try do
-            prepare_tools(definition, tools)
-          rescue
-            _ -> {:error, :invalid_plugin_result}
-          end
-        end
-
-      with {:ok, _tools} <- tools,
-           {:ok, _prepared} <- prepared do
-        :ok
+      rescue
+        _ -> {:error, :invalid_tool_definitions}
+      catch
+        _, _ -> {:error, :invalid_tool_definitions}
       end
     else
       {:error, :invalid_configuration}

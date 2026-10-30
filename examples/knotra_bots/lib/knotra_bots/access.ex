@@ -14,7 +14,7 @@ defmodule KnotraBots.Access do
 
   @behaviour Knotra.Access
 
-  @actions [:submit, :inspect, :list, :checkpoint, :recover, :answer, :cancel, :close]
+  @actions [:submit, :inspect, :checkpoint, :recover, :answer, :cancel, :close]
 
   @impl true
   def authorize(action, _id, %{tenant: tenant, permissions: permissions} = context)

@@ -5,8 +5,12 @@ defmodule Knotra.Observability.Store do
   alias Knotra.Observability.Snapshot
 
   @defaults [max_records: 200, max_events: 2_000, notify_ms: 100, message_limit: 200]
-  @terminal [:completed, :failed, :cancelled, :blocked, :waiting, :rejected, :expired]
+  # `:waiting` is live: a pending approval or clarification may last indefinitely,
+  # so it is never evicted as a finished record.
+  @terminal [:completed, :failed, :cancelled, :blocked, :rejected, :expired]
   @max_links 1_000
+  @max_pending_annotations 200
+  @max_labels 20
 
   def start_link(opts),
     do: GenServer.start_link(__MODULE__, opts, name: via(Keyword.fetch!(opts, :instance)))
@@ -58,9 +62,14 @@ defmodule Knotra.Observability.Store do
        instance: instance,
        records: %{},
        pending_annotations: %{},
+       pending_seq: 0,
+       terminals: :gb_sets.empty(),
+       terminal_keys: %{},
        links: [],
        subscribers: %{},
        notify_timer: nil,
+       snapshot_cache: %{},
+       version: 0,
        seq: 0,
        max_records: Keyword.fetch!(config, :max_records),
        max_events: Keyword.fetch!(config, :max_events),
@@ -100,20 +109,31 @@ defmodule Knotra.Observability.Store do
   def handle_call({:snapshot, opts}, _from, state) do
     limit = Keyword.get(opts, :message_limit, state.message_limit)
 
-    snapshot =
-      Snapshot.build(
-        Map.values(state.records),
-        links: state.links,
-        message_limit: limit
-      )
+    case state.snapshot_cache do
+      %{^limit => {version, snapshot}} when version == state.version ->
+        {:reply, {:ok, snapshot}, state}
 
-    {:reply, {:ok, snapshot}, state}
+      _ ->
+        snapshot =
+          Snapshot.build(
+            Map.values(state.records),
+            links: state.links,
+            message_limit: limit
+          )
+
+        cache =
+          if map_size(state.snapshot_cache) >= 4,
+            do: %{limit => {state.version, snapshot}},
+            else: Map.put(state.snapshot_cache, limit, {state.version, snapshot})
+
+        {:reply, {:ok, snapshot}, %{state | snapshot_cache: cache}}
+    end
   end
 
   def handle_call({:execution, id}, _from, state) do
     case fetch_record(state, id) do
       {:ok, record} ->
-        events = Enum.reverse(record.events)
+        events = :queue.to_list(record.events)
         finish = record.finished_at || record.updated_at
 
         record =
@@ -197,21 +217,24 @@ defmodule Knotra.Observability.Store do
   defp upsert(state, meta, attrs, entry \\ nil) do
     now = System.system_time(:millisecond)
     id = Map.fetch!(meta, :id)
+    previous = Map.get(state.records, id)
 
     record =
-      case Map.fetch(state.records, id) do
-        {:ok, record} -> record
-        :error -> new_record(state, meta, now)
+      case previous do
+        nil -> new_record(state, meta, now)
+        record -> record
       end
 
     record =
       record
       |> Map.merge(attrs)
       |> Map.put(:updated_at, now)
+      |> maybe_reopen()
       |> maybe_finish(now)
       |> maybe_append(entry, state.max_events)
 
     %{state | records: Map.put(state.records, id, record), seq: max(state.seq, record.seq)}
+    |> track_terminal(previous, record)
     |> apply_pending_annotation(id)
     |> evict()
   end
@@ -237,7 +260,9 @@ defmodule Knotra.Observability.Store do
       started_at: Map.get(meta, :started_at, now),
       updated_at: now,
       finished_at: nil,
-      events: [],
+      # Newest events are appended at the rear; the front is trimmed, so both
+      # ends stay O(1) however long the execution runs.
+      events: :queue.new(),
       event_count: 0,
       retained_events: 0,
       seq: seq
@@ -253,18 +278,25 @@ defmodule Knotra.Observability.Store do
   defp maybe_append(record, nil, _max_events), do: record
 
   defp maybe_append(record, entry, max_events) do
-    events = [entry | record.events]
+    events = :queue.in(entry, record.events)
     retained = record.retained_events + 1
 
     {events, retained} =
       if max_events == :infinity or retained <= max_events do
         {events, retained}
       else
-        {Enum.take(events, max_events), max_events}
+        {:queue.drop(events), max_events}
       end
 
     %{record | events: events, event_count: record.event_count + 1, retained_events: retained}
   end
+
+  # A durable execution that resumes after a wait runs again; its duration must
+  # not end at the first wait. Clearing the timestamp lets the next terminal
+  # transition set the real finish.
+  defp maybe_reopen(%{finished_at: nil} = record), do: record
+  defp maybe_reopen(%{status: status} = record) when status in @terminal, do: record
+  defp maybe_reopen(record), do: %{record | finished_at: nil}
 
   defp maybe_finish(%{finished_at: nil} = record, now) do
     if record.status in @terminal, do: %{record | finished_at: now}, else: record
@@ -272,18 +304,50 @@ defmodule Knotra.Observability.Store do
 
   defp maybe_finish(record, _now), do: record
 
+  # Terminal records are indexed in eviction order so retention does not scan
+  # every running execution on each event.
+  defp track_terminal(state, previous, record) do
+    was_terminal = previous != nil and previous.status in @terminal
+    terminal? = record.status in @terminal
+
+    cond do
+      terminal? and not was_terminal ->
+        key = {record.started_at, record.seq, record.id}
+
+        %{
+          state
+          | terminals: :gb_sets.add(key, state.terminals),
+            terminal_keys: Map.put(state.terminal_keys, record.id, key)
+        }
+
+      was_terminal and not terminal? ->
+        case Map.pop(state.terminal_keys, record.id) do
+          {nil, keys} ->
+            %{state | terminal_keys: keys}
+
+          {key, keys} ->
+            %{state | terminal_keys: keys, terminals: :gb_sets.delete_any(key, state.terminals)}
+        end
+
+      true ->
+        state
+    end
+  end
+
   defp update_record(state, id, attrs) do
     case fetch_record(state, id) do
-      {:ok, record} ->
+      {:ok, previous} ->
         now = System.system_time(:millisecond)
 
         record =
-          record
+          previous
           |> Map.merge(attrs)
           |> Map.put(:updated_at, now)
+          |> maybe_reopen()
           |> maybe_finish(now)
 
         %{state | records: Map.put(state.records, record.id, record)}
+        |> track_terminal(previous, record)
 
       :error ->
         state
@@ -297,8 +361,31 @@ defmodule Knotra.Observability.Store do
         %{state | records: Map.put(state.records, record.id, record)}
 
       :error ->
-        pending = Map.update(state.pending_annotations, id, trace, &merge_trace(&1, trace))
-        %{state | pending_annotations: pending}
+        seq = state.pending_seq + 1
+
+        trace =
+          case Map.fetch(state.pending_annotations, id) do
+            {:ok, {_seq, previous}} -> merge_trace(previous, trace)
+            :error -> trace
+          end
+
+        pending =
+          state.pending_annotations
+          |> Map.put(id, {seq, trace})
+          |> prune_pending()
+
+        %{state | pending_annotations: pending, pending_seq: seq}
+    end
+  end
+
+  # Annotations may arrive before their execution registers. Keep that race
+  # working without letting unknown ids grow memory forever.
+  defp prune_pending(pending) do
+    if map_size(pending) > @max_pending_annotations do
+      {id, _} = Enum.min_by(pending, fn {_id, {seq, _trace}} -> seq end)
+      Map.delete(pending, id)
+    else
+      pending
     end
   end
 
@@ -307,7 +394,7 @@ defmodule Knotra.Observability.Store do
       {nil, _pending} ->
         state
 
-      {trace, pending} ->
+      {{_seq, trace}, pending} ->
         records =
           Map.update!(state.records, id, fn record ->
             %{record | trace: merge_trace(record.trace, trace)}
@@ -319,10 +406,19 @@ defmodule Knotra.Observability.Store do
 
   defp merge_trace(left, right) do
     Map.merge(normalize_record_trace(left), normalize_record_trace(right), fn
-      :labels, old, new -> Map.merge(old, new)
+      :labels, old, new -> cap_labels(Map.merge(old, new))
       _key, old, nil -> old
       _key, _old, new -> new
     end)
+  end
+
+  defp cap_labels(labels) when map_size(labels) <= @max_labels, do: labels
+
+  defp cap_labels(labels) do
+    labels
+    |> Enum.sort_by(fn {key, _value} -> key end)
+    |> Enum.take(@max_labels)
+    |> Map.new()
   end
 
   defp fetch_record(state, id) do
@@ -348,30 +444,35 @@ defmodule Knotra.Observability.Store do
 
   defp evict(state) do
     if map_size(state.records) > state.max_records do
-      case oldest_terminal(state.records) do
-        nil -> state
-        {id, _record} -> state |> Map.update!(:records, &Map.delete(&1, id)) |> evict()
+      case :gb_sets.is_empty(state.terminals) do
+        true ->
+          state
+
+        false ->
+          {{_started_at, _seq, id}, terminals} = :gb_sets.take_smallest(state.terminals)
+
+          %{
+            state
+            | terminals: terminals,
+              terminal_keys: Map.delete(state.terminal_keys, id),
+              records: Map.delete(state.records, id)
+          }
+          |> evict()
       end
     else
       state
     end
   end
 
-  defp oldest_terminal(records) do
-    terminals = Enum.filter(records, fn {_id, record} -> record.status in @terminal end)
+  defp mark_dirty(state) do
+    state = %{state | version: state.version + 1}
 
-    case terminals do
-      [] -> nil
-      terminals -> Enum.min_by(terminals, fn {_id, record} -> {record.started_at, record.seq} end)
+    if map_size(state.subscribers) > 0 and state.notify_timer == nil do
+      %{state | notify_timer: Process.send_after(self(), :notify, state.notify_ms)}
+    else
+      state
     end
   end
-
-  defp mark_dirty(%{subscribers: subscribers, notify_timer: nil, notify_ms: ms} = state)
-       when map_size(subscribers) > 0 do
-    %{state | notify_timer: Process.send_after(self(), :notify, ms)}
-  end
-
-  defp mark_dirty(state), do: state
 
   defp now, do: System.system_time(:millisecond)
 end

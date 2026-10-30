@@ -19,7 +19,7 @@ defmodule KnotraBots do
   ]
   @offline "fake"
   @tenant "demo"
-  @permissions [:submit, :inspect, :answer]
+  @permissions [:submit, :inspect, :answer, :recover]
 
   @doc "The demo tenant used by the UI, the access policy and the tools."
   def tenant, do: @tenant
@@ -57,6 +57,7 @@ defmodule KnotraBots do
     Ecto.Migrator.up(KnotraBots.Repo, 2, KnotraBots.Persistence.Migration, log: false)
     Ecto.Migrator.up(KnotraBots.Repo, 3, KnotraBots.Persistence.MigrationV3, log: false)
     Ecto.Migrator.up(KnotraBots.Repo, 4, KnotraBots.Persistence.MigrationV4, log: false)
+    Ecto.Migrator.up(KnotraBots.Repo, 5, KnotraBots.Persistence.MigrationV5, log: false)
     KnotraBots.Agents.seed!()
     KnotraBots.Channels.seed!()
   end

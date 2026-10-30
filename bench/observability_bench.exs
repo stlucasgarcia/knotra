@@ -11,11 +11,12 @@ defmodule Knotra.Bench.Observability do
     ingest = best(for r <- results, do: r.ingest_us)
     snapshot = best(for r <- results, do: r.snapshot_ms)
     detail = best(for r <- results, do: r.detail_ms)
+    retained = results |> Enum.map(& &1.retained_events) |> Enum.max()
 
     IO.puts("METRIC ingest_us_per_event=#{Float.round(ingest, 3)}")
     IO.puts("METRIC snapshot_build_ms=#{Float.round(snapshot, 3)}")
     IO.puts("METRIC execution_detail_ms=#{Float.round(detail, 3)}")
-    IO.puts("METRIC retained_events=#{@executions * @events}")
+    IO.puts("METRIC retained_events=#{retained}")
   end
 
   defp warmup do
@@ -98,9 +99,20 @@ defmodule Knotra.Bench.Observability do
 
     detail_ms = sample_ms(fn -> Knotra.Observability.execution(name, 1) end)
 
+    retained_events =
+      case Knotra.Observability.execution(name, 1) do
+        {:ok, detail} -> detail.retained_events * executions
+        _ -> 0
+      end
+
     Supervisor.stop(supervisor)
 
-    %{ingest_us: ingest_us, snapshot_ms: snapshot_ms, detail_ms: detail_ms}
+    %{
+      ingest_us: ingest_us,
+      snapshot_ms: snapshot_ms,
+      detail_ms: detail_ms,
+      retained_events: retained_events
+    }
   end
 
   defp gc(name) do

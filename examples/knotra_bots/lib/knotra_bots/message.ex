@@ -22,6 +22,10 @@ defmodule KnotraBots.Message do
     field(:hop, :integer, default: 0)
     field(:execution_id, :string)
     field(:definition_version, :string)
+    # Frozen at queue time so a retry sends the same request the durable store
+    # already accepted, even if the channel or the agent changed meanwhile.
+    field(:input, :string)
+    field(:definition_snapshot, :string)
     timestamps()
   end
 end
